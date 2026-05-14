@@ -1,0 +1,46 @@
+name: clear hidden storage
+
+on:
+  workflow_dispatch:
+
+jobs:
+  clean-hidden-storage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create clean branch without any history
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          
+          # Create an orphan branch (no parent, no history)
+          git checkout --orphan clean-branch
+          
+          # Add ALL current files to this new branch
+          git add -A
+          
+          # Create a single commit with all current files
+          git commit -m "Clean slate: Repository history reset $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          
+          # Force push this clean branch to main, replacing all old history
+          git push origin clean-branch:main --force
+          
+          # Delete the temporary clean branch locally
+          git checkout main
+          git branch -D clean-branch
+
+      - name: Verify cleanup
+        run: |
+          echo "✅ Repository history has been reset!"
+          echo ""
+          echo "📊 Current repository info:"
+          echo "   - Total commits: $(git rev-list --count HEAD)"
+          echo "   - Current branch: $(git branch --show-current)"
+          echo "   - Latest commit: $(git log -1 --pretty=%B)"

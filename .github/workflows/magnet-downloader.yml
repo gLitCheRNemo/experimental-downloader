@@ -1,0 +1,164 @@
+name: Magnet Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      magnet:
+        description: '🧲 Magnet link (torrent)'
+        required: true
+        type: string
+      result_name:
+        description: '📝 Folder Name'
+        default: 'magnet_archive'
+        required: true
+        type: string
+      use_warp:
+        description: '🛡️ Use WARP (sometimes helps | +40s)'
+        required: true
+        default: false
+        type: boolean
+      parts_size:
+        description: '🫙 Parts size (MB)'
+        required: false
+        type: string
+        default: '45'
+
+jobs:
+  download-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Prepare magnet branch
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git fetch origin
+
+          if git ls-remote --exit-code --heads origin magnet; then
+            git checkout magnet
+            git pull origin magnet
+          else
+            git checkout --orphan magnet
+            git rm -rf . || true
+            mkdir -p magnet
+            git commit --allow-empty -m "[bot] Initialize magnet branch"
+            git push --set-upstream origin magnet
+          fi
+
+      - name: Setup WARP
+        if: ${{ inputs.use_warp }}
+        run: |
+          # clean up any existing container/network (useful for self-hosted runners)
+          docker rm -f warp 2>/dev/null || true
+          docker network create warp-net 2>/dev/null || true
+
+          # start WARP 
+          docker run -d \
+            --name warp \
+            --restart=always \
+            --network warp-net \
+            -p 1080:1080 \
+            --cap-add NET_ADMIN \
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            -v warp-data:/var/lib/cloudflare-warp \
+            caomingjun/warp
+
+          echo "Waiting for WARP to initialize..."
+
+          # dynamic polling loop (up to 30 seconds max)
+          WARP_READY=false
+          for i in {1..10}; do
+            # use 1.1.1.1 for faster trace resolution
+            RESULT=$(curl -s --max-time 3 --socks5-hostname 127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
+            
+            if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
+              echo "WARP proxy is ready! (Took $i attempts)"
+              echo "$RESULT" | grep -E "^(ip|warp|colo)=" # Print clean debug info
+              WARP_READY=true
+              break
+            fi
+            
+            echo "Attempt $i/10 - WARP not ready, waiting 3s..."
+            sleep 3
+          done
+
+          if [ "$WARP_READY" = false ]; then
+            echo "WARP failed to activate fully, continuing anyway..."
+            echo "Last response: $RESULT"
+            # exit 1  <-- Uncomment this if you want the pipeline to FAIL when WARP fails
+          fi
+
+      - name: Setup aria2
+        run: |
+          sudo apt-get install -y aria2
+          aria2c --version
+
+      - name: Download
+        id: download
+        run: |
+          mkdir -p tmpmagnet
+          cd tmpmagnet
+          MAGNET="${{ inputs.magnet }}"
+          PART_SIZE="${{ inputs.parts_size }}"
+          RESULT_NAME="${{ inputs.result_name }}"
+
+          # Optional SOCKS5 proxy via WARP
+          if [ ${{ inputs.use_warp }} == 'true' ]; then
+            export http_proxy=socks5h://127.0.0.1:1080
+          fi
+
+          aria2c \
+            --enable-dht=true \
+            --bt-enable-lpd=true \
+            --bt-max-peers=0 \
+            --seed-time=0 \
+            --follow-torrent=true \
+            --check-integrity=true \
+            --dir=magnet \
+            "$MAGNET"
+
+          echo "Download completed"
+
+          # zip
+          mkdir -p ../magnet
+          zip -0 -r -s "${{ inputs.parts_size }}m" "../magnet/${RESULT_NAME}.zip" .
+
+      - name: Stop WARP
+        if: ${{ inputs.use_warp }}
+        run: |
+          docker stop warp || true
+
+      - name: Generate README with Download Links
+        run: |
+          rm -f README.md
+          
+          echo "# 📥 Magnet Download Links" > README.md
+          echo "Generated on: $(date)" >> README.md
+          echo "" >> README.md
+          
+          # loop through all files in the magnet folder
+          for file in magnet/*; do
+            if [ -f "$file" ]; then
+              filename=$(basename "$file")
+              # URL Encode spaces for the markdown link
+              encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
+              # Construct the raw link
+              url="https://github.com/${{ github.repository }}/raw/magnet/magnet/$encoded_filename"
+              echo "- [Download $filename]($url)" >> README.md
+            fi
+          done
+          
+      - name: Commit
+        run: |
+          git add README.md magnet
+          git commit -m "[bot] Add magnet download ${{ env.SAFE_NAME }}"
+          git push

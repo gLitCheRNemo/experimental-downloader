@@ -1,0 +1,226 @@
+name: Video Downloader V2
+
+on:
+  workflow_dispatch:
+    inputs:
+      youtube_url:
+        description: '🔗 YouTube video URL(s)'
+        required: true
+        type: string
+      quality:
+        description: '🎬 Video quality'
+        required: true
+        default: 'best'
+        type: choice
+        options:
+          - best
+          - 2160
+          - 1440
+          - 1080
+          - 720
+          - 480
+          - audio
+      parts_size:
+        description: '🫙 Parts size (MB)'
+        required: false
+        type: string
+        default: '45'
+      output_name:
+        description: '📝 Output file name (optional, without extension)'
+        required: false
+        type: string
+
+jobs:
+  download-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Prepare videos branch
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git fetch origin
+
+          if git ls-remote --exit-code --heads origin videos; then
+            git checkout videos
+            git pull origin videos
+          else
+            git checkout --orphan videos
+            git rm -rf . || true
+            mkdir -p videos
+            git commit --allow-empty -m "[bot] Initialize videos branch"
+            git push --set-upstream origin videos
+          fi
+
+      - name: Setup FFmpeg
+        run: |
+          wget https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          tar -xf ffmpeg-master-latest-linux64-gpl.tar.xz
+          sudo mv ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/
+          sudo mv ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/
+          ffmpeg -version
+
+      - name: Setup WARP
+        run: |
+          docker rm -f warp 2>/dev/null || true
+          docker network create warp-net 2>/dev/null || true
+
+          docker run -d \
+            --name warp \
+            --restart=always \
+            --network warp-net \
+            -p 1080:1080 \
+            --cap-add NET_ADMIN \
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            -v warp-data:/var/lib/cloudflare-warp \
+            caomingjun/warp
+
+          echo "Waiting for WARP to initialize..."
+
+          WARP_READY=false
+          for i in {1..10}; do
+            RESULT=$(curl -s --max-time 3 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+            
+            if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
+              echo "WARP proxy is ready! (Took $i attempts)"
+              echo "$RESULT" | grep -E "^(ip|warp|colo)="
+              WARP_READY=true
+              break
+            fi
+            
+            echo "Attempt $i/10 - WARP not ready, waiting 3s..."
+            sleep 3
+          done
+
+          if [ "$WARP_READY" = false ]; then
+            echo "WARP failed to activate fully, continuing anyway..."
+            echo "Last response: $RESULT"
+          fi
+
+      - name: Setup yt-dlp
+        run: |
+          sudo apt-get install -y python3-pip curl
+          pip install yt-dlp --pre
+
+          curl -fsSL https://deno.land/install.sh | sh
+          export DENO_INSTALL="$HOME/.deno"
+          export PATH="$DENO_INSTALL/bin:$PATH"
+          echo "$DENO_INSTALL/bin" >> $GITHUB_PATH
+          deno --version
+          
+      - name: Download videos
+        id: download
+        run: |
+          QUALITY="${{ inputs.quality }}"
+          
+          if [ "$QUALITY" = "audio" ]; then
+            FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
+          elif [ "$QUALITY" = "best" ]; then
+            FORMAT_OPTS="-f bestvideo+bestaudio/best --merge-output-format mp4"
+          else
+            FORMAT_OPTS="-f bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}] --merge-output-format mp4"
+          fi
+
+          OUTPUT_NAME="${{ inputs.output_name }}"
+          if [ -n "$OUTPUT_NAME" ]; then
+            OUTPUT_OPTS="-o ${OUTPUT_NAME}.%(ext)s"
+          else
+            OUTPUT_OPTS=""
+          fi
+          
+          mkdir -p tmpvideos
+          cd tmpvideos
+          yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" $FORMAT_OPTS $OUTPUT_OPTS "${{ inputs.youtube_url }}"
+
+          FILE=$(ls -1 | head -n 1)
+          FILE_NO_EXTENSION="${FILE%.*}"
+          echo "FILE=$FILE" >> $GITHUB_ENV
+          echo "FILE_NO_EXTENSION=$FILE_NO_EXTENSION" >> $GITHUB_ENV
+          SAFE_NAME=$(echo "$FILE" | sed 's/^[[:space:]]*//' | tr ' ' '_')
+          echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
+
+          zip -0 -s "${{ inputs.parts_size }}m" "../videos/${SAFE_NAME}.zip" "$FILE"
+          ls -la
+          
+          docker stop warp || true
+
+      - name: Generate README with Download Links
+        run: |
+          rm -f README.md
+          
+          echo "# 📥 Download Links" > README.md
+          echo "Generated on: $(date)" >> README.md
+          echo "" >> README.md
+          
+          for file in videos/*; do
+            if [ -f "$file" ]; then
+              filename=$(basename "$file")
+              encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
+              url="https://github.com/${{ github.repository }}/raw/videos/videos/$encoded_filename"
+              echo "- [Download $filename]($url)" >> README.md
+            fi
+          done
+
+      - name: Commit and Push in Batches of 5
+        run: |
+          # Store list of files in a temporary file
+          ls videos/* 2>/dev/null > file_list.txt || true
+          
+          # Count total files
+          TOTAL_FILES=$(cat file_list.txt | wc -l)
+          echo "Total files to commit: $TOTAL_FILES"
+          
+          if [ "$TOTAL_FILES" -eq 0 ]; then
+            echo "No new files to commit"
+            exit 0
+          fi
+          
+          # Set batch size (5 files per commit)
+          BATCH_SIZE=5
+          BATCH_NUM=1
+          
+          # Process files in batches
+          while [ $(cat file_list.txt | wc -l) -gt 0 ]; do
+            # Take first BATCH_SIZE files
+            BATCH_FILES=$(head -n $BATCH_SIZE file_list.txt)
+            
+            # Remove these files from the list for next iteration
+            tail -n +$((BATCH_SIZE + 1)) file_list.txt > temp_list.txt 2>/dev/null || touch temp_list.txt
+            mv temp_list.txt file_list.txt
+            
+            # Add and commit this batch
+            for file in $BATCH_FILES; do
+              if [ -f "$file" ]; then
+                git add "$file"
+              fi
+            done
+            
+            # Also add README.md only on first batch
+            if [ $BATCH_NUM -eq 1 ] && [ -f "README.md" ]; then
+              git add README.md
+            fi
+            
+            # Commit this batch
+            git commit -m "[bot] Add video files batch $BATCH_NUM ($(echo $BATCH_FILES | wc -w) files)"
+            
+            # Push after each batch
+            git push
+            
+            echo "✅ Batch $BATCH_NUM committed and pushed"
+            BATCH_NUM=$((BATCH_NUM + 1))
+            
+            # Optional: small delay to avoid overwhelming GitHub
+            sleep 2
+          done
+          
+          echo "✅ All $TOTAL_FILES files committed and pushed in batches"
+          rm -f file_list.txt temp_list.txt

@@ -1,0 +1,215 @@
+name: Magnet Downloader V2
+
+on:
+  workflow_dispatch:
+    inputs:
+      magnet:
+        description: '🧲 Magnet link (torrent)'
+        required: true
+        type: string
+      result_name:
+        description: '📝 Folder Name'
+        default: 'magnet_archive'
+        required: true
+        type: string
+      use_warp:
+        description: '🛡️ Use WARP (sometimes helps | +40s)'
+        required: true
+        default: false
+        type: boolean
+      parts_size:
+        description: '🫙 Parts size (MB)'
+        required: false
+        type: string
+        default: '45'
+
+jobs:
+  download-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Prepare magnet branch
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git fetch origin
+
+          if git ls-remote --exit-code --heads origin magnet; then
+            git checkout magnet
+            git pull origin magnet
+          else
+            git checkout --orphan magnet
+            git rm -rf . || true
+            mkdir -p magnet
+            git commit --allow-empty -m "[bot] Initialize magnet branch"
+            git push --set-upstream origin magnet
+          fi
+
+      - name: Setup WARP
+        if: ${{ inputs.use_warp == 'true' }}
+        run: |
+          docker rm -f warp 2>/dev/null || true
+          docker network create warp-net 2>/dev/null || true
+
+          docker run -d \
+            --name warp \
+            --restart=always \
+            --network warp-net \
+            -p 1080:1080 \
+            --cap-add NET_ADMIN \
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            -v warp-data:/var/lib/cloudflare-warp \
+            caomingjun/warp
+
+          echo "Waiting for WARP to initialize..."
+
+          WARP_READY=false
+          for i in {1..10}; do
+            RESULT=$(curl -s --max-time 3 --socks5-hostname 127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
+            
+            if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
+              echo "WARP proxy is ready! (Took $i attempts)"
+              echo "$RESULT" | grep -E "^(ip|warp|colo)="
+              WARP_READY=true
+              break
+            fi
+            
+            echo "Attempt $i/10 - WARP not ready, waiting 3s..."
+            sleep 3
+          done
+
+          if [ "$WARP_READY" = false ]; then
+            echo "WARP failed to activate fully, continuing anyway..."
+            echo "Last response: $RESULT"
+          fi
+
+      - name: Setup aria2
+        run: |
+          sudo apt-get install -y aria2
+          aria2c --version
+
+      - name: Download
+        id: download
+        run: |
+          mkdir -p tmpmagnet
+          cd tmpmagnet
+          MAGNET="${{ inputs.magnet }}"
+          RESULT_NAME="${{ inputs.result_name }}"
+
+          if [ "${{ inputs.use_warp }}" = "true" ]; then
+            export http_proxy=socks5h://127.0.0.1:1080
+          fi
+
+          aria2c \
+            --enable-dht=true \
+            --bt-enable-lpd=true \
+            --bt-max-peers=0 \
+            --seed-time=0 \
+            --follow-torrent=true \
+            --check-integrity=true \
+            --dir=magnet \
+            "$MAGNET"
+
+          echo "Download completed"
+
+          # Create SAFE_NAME like the original code
+          SAFE_NAME=$(echo "$RESULT_NAME" | sed 's/^[[:space:]]*//' | tr ' ' '_')
+          echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
+
+          # zip - matching original behavior
+          mkdir -p ../magnet
+          zip -0 -r -s "${{ inputs.parts_size }}m" "../magnet/${SAFE_NAME}.zip" .
+
+      - name: Stop WARP
+        if: ${{ inputs.use_warp == 'true' }}
+        run: |
+          docker stop warp || true
+
+      - name: Generate README with Download Links
+        run: |
+          rm -f README.md
+          
+          echo "# 📥 Magnet Download Links" > README.md
+          echo "Generated on: $(date)" >> README.md
+          echo "" >> README.md
+          
+          for file in magnet/*; do
+            if [ -f "$file" ]; then
+              filename=$(basename "$file")
+              encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
+              url="https://github.com/${{ github.repository }}/raw/magnet/magnet/$encoded_filename"
+              echo "- [Download $filename]($url)" >> README.md
+            fi
+          done
+
+      - name: Commit and Push in Batches of 5
+        run: |
+          # Ensure we are on the magnet branch
+          git checkout magnet
+          
+          # Check if magnet directory exists and has files
+          if [ ! -d "magnet" ] || [ -z "$(ls -A magnet 2>/dev/null)" ]; then
+            echo "No files found in magnet directory. Skipping commit."
+            exit 0
+          fi
+          
+          # Store list of files
+          ls magnet/* 2>/dev/null > file_list.txt || true
+          
+          TOTAL_FILES=$(cat file_list.txt | wc -l)
+          echo "Total files to commit: $TOTAL_FILES"
+          
+          if [ "$TOTAL_FILES" -eq 0 ]; then
+            echo "No new files to commit"
+            rm -f file_list.txt
+            exit 0
+          fi
+          
+          BATCH_SIZE=5
+          BATCH_NUM=1
+          
+          while [ $(cat file_list.txt | wc -l) -gt 0 ]; do
+            BATCH_FILES=$(head -n $BATCH_SIZE file_list.txt)
+            
+            tail -n +$((BATCH_SIZE + 1)) file_list.txt > temp_list.txt 2>/dev/null || touch temp_list.txt
+            mv temp_list.txt file_list.txt
+            
+            echo "📦 Processing batch $BATCH_NUM with $(echo $BATCH_FILES | wc -w) files..."
+            
+            for file in $BATCH_FILES; do
+              if [ -f "$file" ]; then
+                git add "$file"
+                echo "  Added: $(basename "$file")"
+              fi
+            done
+            
+            if [ $BATCH_NUM -eq 1 ] && [ -f "README.md" ]; then
+              git add README.md
+              echo "  Added: README.md"
+            fi
+            
+            # Only commit if there are changes
+            if ! git diff --cached --quiet; then
+              git commit -m "[bot] Add magnet files batch $BATCH_NUM ($(echo $BATCH_FILES | wc -w) files)"
+              git push origin magnet
+              echo "✅ Batch $BATCH_NUM committed and pushed successfully"
+            else
+              echo "⚠️ No changes to commit in batch $BATCH_NUM"
+            fi
+            
+            BATCH_NUM=$((BATCH_NUM + 1))
+            
+            sleep 2
+          done
+          
+          echo "✅ All $TOTAL_FILES files committed and pushed successfully to magnet branch in $((BATCH_NUM - 1)) batches"
+          rm -f file_list.txt temp_list.txt
