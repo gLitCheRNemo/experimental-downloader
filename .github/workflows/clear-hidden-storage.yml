@@ -1,46 +1,84 @@
-name: clear hidden storage
+name: Repository Cleaner
 
 on:
   workflow_dispatch:
+    inputs:
+      info:
+        description: 'Running this tool will not delete any files from your repository, but it will clean the history of downloaded and deleted files that are separately stored and unnecessarily fill up your GitHub space. It is recommended to run this tool once after you finish downloading your files ✨'
+        required: false
+        default: '🚀 Press Run workflow to execute'
+        type: string
+        
+permissions:
+  contents: write
 
 jobs:
-  clean-hidden-storage:
+  check-status:
+    name: 📊 Check Repository Status
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     
     steps:
-      - name: Checkout repository
+      - name: 📥 Fetch full history
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Create clean branch without any history
+      - name: 📊 Show repository status summary
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
+          echo "## 📊 Repository Status Before Cleaning" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           
-          # Create an orphan branch (no parent, no history)
-          git checkout --orphan clean-branch
+          echo "### 📦 Repository Size" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| .git folder | $(du -sh .git | cut -f1) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Objects | $(du -sh .git/objects | cut -f1) |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           
-          # Add ALL current files to this new branch
-          git add -A
+          echo "### 🔢 Number of Commits" >> $GITHUB_STEP_SUMMARY
+          echo "**$(git rev-list --count HEAD)** commits" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           
-          # Create a single commit with all current files
-          git commit -m "Clean slate: Repository history reset $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-          
-          # Force push this clean branch to main, replacing all old history
-          git push origin clean-branch:main --force
-          
-          # Delete the temporary clean branch locally
-          git checkout main
-          git branch -D clean-branch
+          echo "### 📁 Files larger than 20MB in history" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          git rev-list --objects --all | \
+            git cat-file --batch-check='%(objecttype) %(objectname) %(objectsize) %(rest)' | \
+            sed -n 's/^blob //p' | \
+            awk '$2 >= 20971520 { print $3, int($2/1048576) "MB" }' | \
+            sort -k2 -rn | head -20 >> $GITHUB_STEP_SUMMARY || echo "No files found ✅" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
-      - name: Verify cleanup
+  clean-history:
+    name: 🗑️ Clean Repository History
+    needs: check-status
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 Fetch full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: ⚙️ Install git-filter-repo
+        run: pip install git-filter-repo
+
+      - name: 🧹 Remove files larger than 20MB from history
+        run: git filter-repo --strip-blobs-bigger-than 20M --force
+
+      - name: 🚀 Push changes to repository
         run: |
-          echo "✅ Repository history has been reset!"
-          echo ""
-          echo "📊 Current repository info:"
-          echo "   - Total commits: $(git rev-list --count HEAD)"
-          echo "   - Current branch: $(git branch --show-current)"
-          echo "   - Latest commit: $(git log -1 --pretty=%B)"
+          git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          git push --force --all
+          git push --force --tags
+
+      - name: ✅ Show final result
+        run: |
+          echo "## ✅ Cleaning completed successfully!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📏 New repository size" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| .git folder | $(du -sh .git | cut -f1) |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🎉 All files larger than 20MB have been removed from history!" >> $GITHUB_STEP_SUMMARY
