@@ -1,0 +1,18 @@
+name: magnet branch remover
+
+on:
+  workflow_dispatch:  # Allows you to run this manually from the Actions tab
+  schedule:
+    - cron: '0 0 * * 0'  # Optional: runs automatically every Sunday at midnight
+
+jobs:
+  delete-magnet-branch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required to delete branches
+    steps:
+      - name: Delete magnet branch
+        uses: dawidd6/action-delete-branch@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          branches: magnet
