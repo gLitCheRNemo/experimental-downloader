@@ -147,28 +147,25 @@ jobs:
           mkdir -p parts
           
           # Create a split ZIP archive
-          # This creates: video_split.z01, video_split.z02, ..., video_split.zip
           cd tmpvideos
           zip -s ${PARTS_SIZE}m -r ../parts/video_split.zip "$ORIGINAL_FILE"
           cd ..
           
           cd parts
           
-          # Rename parts to have consistent naming
-          COUNTER=1
+          # Rename parts
           for part in video_split.z* video_split.zip; do
             if [ -f "$part" ]; then
               if [[ "$part" == video_split.zip ]]; then
                 mv "$part" "video.zip"
               else
-                # Extract the number from .z01, .z02, etc.
                 NUM=$(echo "$part" | grep -o 'z[0-9]*' | sed 's/z//')
                 mv "$part" "video.z$(printf "%02d" $NUM)"
               fi
             fi
           done
           
-          # Also handle the case where zip creates .z01, .z02 without a leading zero
+          # Fix single-digit numbers
           for part in video.z?; do
             if [ -f "$part" ]; then
               NUM=$(echo "$part" | grep -o 'z[0-9]' | sed 's/z//')
@@ -182,146 +179,70 @@ jobs:
           echo "TOTAL_PARTS=$TOTAL_PARTS" >> $GITHUB_ENV
           echo "Total parts created: $TOTAL_PARTS"
           
-          ls -lh video.z* video.zip 2>/dev/null
-          
-          # Create a README with reassembly instructions
+          # Short README
           cat > README.txt << 'EOF'
-📋 HOW TO REASSEMBLE THE VIDEO:
-
-You have received a split ZIP archive consisting of:
-- video.z01, video.z02, ... (the split parts)
-- video.zip (the final part / index)
-
-To reassemble:
-1. Download ALL parts (.z01, .z02, ..., .zip) to the same folder
-2. Extract the video.zip file using any archive tool (7-Zip, WinRAR, etc.)
-   - Windows: Right-click video.zip → Extract Here
-   - Linux/Mac: unzip video.zip
-
-The video will be restored exactly as downloaded from YouTube.
+📋 To restore: Download ALL parts, then extract video.zip with 7-Zip/WinRAR.
 EOF
-          
-          ls -la
 
-      - name: Send parts one by one to Bale as Documents
+      - name: Send parts to Bale
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
           DELAY="${{ inputs.delay_seconds }}"
-          
-          # Validate delay is a number
-          if ! [[ "$DELAY" =~ ^[0-9]+$ ]]; then
-            echo "Invalid delay value. Using default 2 seconds."
-            DELAY=2
-          fi
+          [[ ! "$DELAY" =~ ^[0-9]+$ ]] && DELAY=2
           
           cd parts
           
-          # Send README.txt first
+          # Send README
           if [ -f "README.txt" ]; then
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "📄 Sending README.txt with reassembly instructions..."
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            
             curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
               -F "chat_id=${CHAT_ID}" \
               -F "document=@README.txt" \
-              -F "caption=📋 HOW TO REASSEMBLE THE VIDEO:%0A%0A1. Download ALL parts (.z01, .z02, ..., .zip)%0A2. Save them in the same folder%0A3. Extract the video.zip file%0A%0AThe video will be restored!"
-            
-            echo "✅ README.txt sent"
+              -F "caption=📋 Extract video.zip with 7-Zip"
             sleep $DELAY
           fi
           
-          # Get list of parts: .z01, .z02, ..., .zip (send .zip last)
-          ZIP_PARTS=$(ls -1 video.z* 2>/dev/null | sort -V)
-          FINAL_ZIP="video.zip"
-          
-          TOTAL_PARTS=$(echo "$ZIP_PARTS" | wc -l)
-          if [ -f "$FINAL_ZIP" ]; then
-            TOTAL_PARTS=$((TOTAL_PARTS + 1))
-          fi
-          
-          echo "Found $TOTAL_PARTS parts to send"
-          echo "Delay between parts: $DELAY seconds"
+          # Send .z* parts
           PART_NUM=1
-          FAILED_PARTS=""
-          
-          # Send all .z* parts first
-          for part in $ZIP_PARTS; do
-            FILE_SIZE=$(stat -c%s "$part")
-            FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
+          FAILED=""
+          for part in $(ls video.z* 2>/dev/null | sort -V); do
+            SIZE=$(stat -c%s "$part")
+            SIZE_MB=$((SIZE / 1024 / 1024))
+            echo "Sending $part (${SIZE_MB}MB) - $PART_NUM/${{ env.TOTAL_PARTS }}"
             
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "📤 Sending part $PART_NUM of $TOTAL_PARTS: $part (${FILE_SIZE_MB} MB)"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            
-            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
               -F "chat_id=${CHAT_ID}" \
               -F "document=@${part}" \
-              -F "caption=🎬 Video Part ${PART_NUM}/${TOTAL_PARTS} (${part})%0A📁 Size: ${FILE_SIZE_MB} MB%0A📋 You need ALL parts to reassemble! Download video.zip last.")
+              -F "caption=📹 Part $PART_NUM/${{ env.TOTAL_PARTS }} | ${SIZE_MB}MB"
             
-            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-            
-            if [ "$HTTP_CODE" -eq 200 ]; then
-              echo "✅ Part $PART_NUM sent successfully!"
-            else
-              echo "❌ Failed to send part $PART_NUM (HTTP $HTTP_CODE)"
-              FAILED_PARTS="$FAILED_PARTS $PART_NUM"
-            fi
-            
+            [ $? -ne 0 ] && FAILED="$FAILED $PART_NUM"
             PART_NUM=$((PART_NUM + 1))
-            
-            if [ $PART_NUM -le $TOTAL_PARTS ]; then
-              echo "⏳ Waiting $DELAY seconds before next part..."
-              sleep $DELAY
-            fi
+            [ $PART_NUM -le ${{ env.TOTAL_PARTS }} ] && sleep $DELAY
           done
           
-          # Send the final .zip file last
-          if [ -f "$FINAL_ZIP" ]; then
-            FILE_SIZE=$(stat -c%s "$FINAL_ZIP")
-            FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
+          # Send final .zip
+          if [ -f "video.zip" ]; then
+            SIZE=$(stat -c%s "video.zip")
+            SIZE_MB=$((SIZE / 1024 / 1024))
+            echo "Sending final video.zip (${SIZE_MB}MB)"
             
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "📤 Sending FINAL part $PART_NUM of $TOTAL_PARTS: $FINAL_ZIP (${FILE_SIZE_MB} MB)"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            
-            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
               -F "chat_id=${CHAT_ID}" \
-              -F "document=@${FINAL_ZIP}" \
-              -F "caption=🎬 FINAL PART - EXTRACT THIS FILE!%0A📁 Size: ${FILE_SIZE_MB} MB%0A📋 TO EXTRACT:%0A1. Download ALL parts (.z01, .z02, ..., .zip)%0A2. Save them in the same folder%0A3. Extract video.zip with 7-Zip or WinRAR%0A%0AThe video will be restored!")
-            
-            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-            
-            if [ "$HTTP_CODE" -eq 200 ]; then
-              echo "✅ Final part sent successfully!"
-            else
-              echo "❌ Failed to send final part (HTTP $HTTP_CODE)"
-              FAILED_PARTS="$FAILED_PARTS $PART_NUM"
-            fi
+              -F "document=@video.zip" \
+              -F "caption=✅ FINAL - Extract this file | ${SIZE_MB}MB"
           fi
           
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          
-          # Send completion message
-          if [ -z "$FAILED_PARTS" ]; then
-            MESSAGE="✅ DOWNLOAD COMPLETE!%0A%0A📦 Total parts: ${TOTAL_PARTS}%0A🎬 Quality: ${{ inputs.quality }}%0A⏱️ Delay: ${DELAY}s%0A%0A📋 TO EXTRACT:%0A1. Download ALL parts (.z01, .z02, ..., .zip)%0A2. Save them in the same folder%0A3. Extract video.zip with 7-Zip or WinRAR%0A%0AThe video will be restored!"
-            echo "✅ All $TOTAL_PARTS parts sent successfully!"
+          # Completion message
+          if [ -z "$FAILED" ]; then
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+              -d "chat_id=${CHAT_ID}" \
+              -d "text=✅ Done! ${{ env.TOTAL_PARTS }} parts sent. Delay: ${DELAY}s"
           else
-            MESSAGE="⚠️ DOWNLOAD PARTIALLY COMPLETE%0A%0A❌ Failed parts:${FAILED_PARTS}%0A⚠️ Some parts failed. Please re-run the workflow."
-            echo "⚠️ Some parts failed: $FAILED_PARTS"
-          fi
-          
-          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-            -d "chat_id=${CHAT_ID}" \
-            -d "text=${MESSAGE}"
-          
-          if [ -n "$FAILED_PARTS" ]; then
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+              -d "chat_id=${CHAT_ID}" \
+              -d "text=⚠️ Partial failure. Failed parts:$FAILED"
             exit 1
           fi
 
       - name: Cleanup
-        run: |
-          rm -rf tmpvideos parts
-          echo "🧹 Cleaned up temporary files"
+        run: rm -rf tmpvideos parts
