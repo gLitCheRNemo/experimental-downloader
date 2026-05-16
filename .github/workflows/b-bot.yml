@@ -141,97 +141,44 @@ jobs:
           
           echo "Splitting $ORIGINAL_FILE into ${PARTS_SIZE}MB parts..."
           
+          # Create parts directory
           mkdir -p parts
           cd tmpvideos
           
+          # Split the file
           split -b ${PARTS_SIZE}M -d "$ORIGINAL_FILE" "../parts/part_"
           
           cd ../parts
           
+          # Rename parts to have .part extension
           for part in part_*; do
             mv "$part" "${part}.part"
           done
           
+          # Count total parts
           TOTAL_PARTS=$(ls -1 *.part | wc -l)
           echo "TOTAL_PARTS=$TOTAL_PARTS" >> $GITHUB_ENV
           echo "Total parts created: $TOTAL_PARTS"
           
+          # List parts with sizes
           ls -lh *.part
 
-      - name: Send parts one by one to Bale (Auto Proxy Fallback & Retry)
+      - name: Send parts one by one to Bale
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
           
           cd parts
           
+          # Get list of parts sorted
           PARTS_LIST=$(ls -1 part_*.part | sort -V)
           TOTAL_PARTS=$(echo "$PARTS_LIST" | wc -l)
-          
-          # Define proxy list to try (order matters - will fall through if one fails)
-          PROXY_LIST=(
-            "http://proxy.github.com:8080"
-            "http://localhost:8080"
-            ""
-          )
-          
-          # Function to send a file with retry and proxy fallback
-          send_with_retry() {
-            local file="$1"
-            local part_num="$2"
-            local total_parts="$3"
-            local max_retries=3
-            
-            for proxy in "${PROXY_LIST[@]}"; do
-              echo "🔄 Trying proxy: ${proxy:-'DIRECT (no proxy)'}"
-              
-              # Set proxy environment
-              if [ -n "$proxy" ]; then
-                export HTTP_PROXY="$proxy"
-                export HTTPS_PROXY="$proxy"
-              else
-                unset HTTP_PROXY
-                unset HTTPS_PROXY
-              fi
-              
-              for attempt in $(seq 1 $max_retries); do
-                echo "  Attempt $attempt of $max_retries..."
-                
-                RESPONSE=$(curl -s -w "\n%{http_code}" --connect-timeout 30 --max-time 120 \
-                  -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
-                  -F "chat_id=${CHAT_ID}" \
-                  -F "document=@${file}" \
-                  -F "caption=🎬 Video: ${{ env.SAFE_NAME }}%0A📦 Part: ${part_num}/${total_parts}%0A🎚️ Quality: ${{ inputs.quality }}%0A🔗 Source: ${{ inputs.youtube_url }}")
-                
-                HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-                BODY=$(echo "$RESPONSE" | sed '$d')
-                
-                if [ "$HTTP_CODE" -eq 200 ]; then
-                  echo "  ✅ Part $part_num sent successfully via ${proxy:-'DIRECT'}"
-                  return 0
-                else
-                  echo "  ❌ Failed (HTTP $HTTP_CODE) - attempt $attempt"
-                  echo "  Response: $BODY"
-                  
-                  if [ $attempt -lt $max_retries ]; then
-                    sleep_time=$((2 ** attempt))
-                    echo "  ⏳ Waiting $sleep_time seconds before retry..."
-                    sleep $sleep_time
-                  fi
-                fi
-              done
-              
-              echo "  ⚠️ Proxy ${proxy:-'DIRECT'} failed after $max_retries attempts, trying next proxy..."
-            done
-            
-            echo "❌ All proxies failed for part $part_num"
-            return 1
-          }
           
           echo "Found $TOTAL_PARTS parts to send"
           PART_NUM=1
           FAILED_PARTS=""
           
+          # Send each part individually
           for part in $PARTS_LIST; do
             FILE_SIZE=$(stat -c%s "$part")
             FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
@@ -240,16 +187,27 @@ jobs:
             echo "📤 Sending part $PART_NUM of $TOTAL_PARTS: $part (${FILE_SIZE_MB} MB)"
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             
-            if send_with_retry "$part" "$PART_NUM" "$TOTAL_PARTS"; then
-              echo "✅ Part $PART_NUM completed"
+            # Send to Bale using tapi.bale.ai
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://tapi.bale.ai/v1/bots/${TOKEN}/sendDocument" \
+              -F "chat_id=${CHAT_ID}" \
+              -F "document=@${part}" \
+              -F "caption=🎬 Video: ${{ env.SAFE_NAME }}%0A📦 Part: ${PART_NUM}/${TOTAL_PARTS}%0A🎚️ Quality: ${{ inputs.quality }}%0A📁 Size: ${FILE_SIZE_MB} MB%0A🔗 Source: ${{ inputs.youtube_url }}")
+            
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            BODY=$(echo "$RESPONSE" | sed '$d')
+            
+            if [ "$HTTP_CODE" -eq 200 ]; then
+              echo "✅ Part $PART_NUM sent successfully!"
             else
-              echo "❌ Part $PART_NUM failed permanently"
+              echo "❌ Failed to send part $PART_NUM (HTTP $HTTP_CODE)"
+              echo "Response: $BODY"
               FAILED_PARTS="$FAILED_PARTS $PART_NUM"
             fi
             
             PART_NUM=$((PART_NUM + 1))
             
-            if [ $PART_NUM -le $TOTAL_PARTS ] && [ -z "$FAILED_PARTS" ]; then
+            # Add delay between parts to avoid rate limiting
+            if [ $PART_NUM -le $TOTAL_PARTS ]; then
               echo "⏳ Waiting 2 seconds before next part..."
               sleep 2
             fi
@@ -258,7 +216,7 @@ jobs:
           echo ""
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
-          # Send completion summary
+          # Send completion summary using tapi.bale.ai
           if [ -z "$FAILED_PARTS" ]; then
             MESSAGE="✅ DOWNLOAD COMPLETE!%0A%0A📹 Video: ${{ env.SAFE_NAME }}%0A📦 Total parts: ${TOTAL_PARTS}%0A🎬 Quality: ${{ inputs.quality }}%0A🔗 Source: ${{ inputs.youtube_url }}%0A%0A✨ All parts sent successfully!"
             echo "✅ All $TOTAL_PARTS parts sent successfully!"
@@ -267,27 +225,9 @@ jobs:
             echo "⚠️ Some parts failed: $FAILED_PARTS"
           fi
           
-          # Try each proxy for the completion message as well
-          for proxy in "${PROXY_LIST[@]}"; do
-            if [ -n "$proxy" ]; then
-              export HTTP_PROXY="$proxy"
-              export HTTPS_PROXY="$proxy"
-            else
-              unset HTTP_PROXY
-              unset HTTPS_PROXY
-            fi
-            
-            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-              -d "chat_id=${CHAT_ID}" \
-              -d "text=${MESSAGE}")
-            
-            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-            
-            if [ "$HTTP_CODE" -eq 200 ]; then
-              echo "✅ Completion message sent via ${proxy:-'DIRECT'}"
-              break
-            fi
-          done
+          curl -s -X POST "https://tapi.bale.ai/v1/bots/${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=${MESSAGE}"
           
           if [ -n "$FAILED_PARTS" ]; then
             exit 1
