@@ -146,14 +146,14 @@ jobs:
           
           mkdir -p parts
           
-          # Create a split ZIP archive
+          # Create a split ZIP archive (like the original downloader)
           cd tmpvideos
           zip -s ${PARTS_SIZE}m -r ../parts/video_split.zip "$ORIGINAL_FILE"
           cd ..
           
           cd parts
           
-          # Rename parts
+          # Rename parts to match original format: video.z01, video.z02, ..., video.zip
           for part in video_split.z* video_split.zip; do
             if [ -f "$part" ]; then
               if [[ "$part" == video_split.zip ]]; then
@@ -165,7 +165,7 @@ jobs:
             fi
           done
           
-          # Fix single-digit numbers
+          # Fix single-digit numbers (z1 -> z01)
           for part in video.z?; do
             if [ -f "$part" ]; then
               NUM=$(echo "$part" | grep -o 'z[0-9]' | sed 's/z//')
@@ -179,10 +179,7 @@ jobs:
           echo "TOTAL_PARTS=$TOTAL_PARTS" >> $GITHUB_ENV
           echo "Total parts created: $TOTAL_PARTS"
           
-          # Short README
-          cat > README.txt << 'EOF'
-📋 To restore: Download ALL parts, then extract video.zip with 7-Zip/WinRAR.
-EOF
+          ls -lh video.z* video.zip 2>/dev/null
 
       - name: Send parts to Bale
         run: |
@@ -193,16 +190,7 @@ EOF
           
           cd parts
           
-          # Send README
-          if [ -f "README.txt" ]; then
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
-              -F "chat_id=${CHAT_ID}" \
-              -F "document=@README.txt" \
-              -F "caption=📋 Extract video.zip with 7-Zip"
-            sleep $DELAY
-          fi
-          
-          # Send .z* parts
+          # Send .z* parts first
           PART_NUM=1
           FAILED=""
           for part in $(ls video.z* 2>/dev/null | sort -V); do
@@ -220,7 +208,7 @@ EOF
             [ $PART_NUM -le ${{ env.TOTAL_PARTS }} ] && sleep $DELAY
           done
           
-          # Send final .zip
+          # Send final .zip last
           if [ -f "video.zip" ]; then
             SIZE=$(stat -c%s "video.zip")
             SIZE_MB=$((SIZE / 1024 / 1024))
@@ -229,7 +217,7 @@ EOF
             curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
               -F "chat_id=${CHAT_ID}" \
               -F "document=@video.zip" \
-              -F "caption=✅ FINAL - Extract this file | ${SIZE_MB}MB"
+              -F "caption=✅ FINAL - Extract this file with 7-Zip | ${SIZE_MB}MB"
           fi
           
           # Completion message
