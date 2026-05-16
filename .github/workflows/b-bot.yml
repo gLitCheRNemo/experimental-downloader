@@ -1,4 +1,4 @@
-name: B Bot
+name: B-Bot
 
 on:
   workflow_dispatch:
