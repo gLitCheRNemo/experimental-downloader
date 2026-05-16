@@ -1,0 +1,72 @@
+name: B Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      bale_token:
+        description: '🤖 Bale Bot Token (from BotFather)'
+        required: true
+        type: string
+      bale_chat_id:
+        description: '💬 Bale Chat ID'
+        required: true
+        type: string
+      test_message:
+        description: '📝 Test message to send'
+        required: false
+        type: string
+        default: 'Hello from GitHub Actions!'
+
+jobs:
+  test-send:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Send test message to Bale
+        run: |
+          TOKEN="${{ inputs.bale_token }}"
+          CHAT_ID="${{ inputs.bale_chat_id }}"
+          MESSAGE="${{ inputs.test_message }}"
+          
+          echo "Token length: ${#TOKEN}"
+          echo "Chat ID: $CHAT_ID"
+          echo "Sending message: $MESSAGE"
+          
+          # Try with GitHub proxy first
+          echo "Trying with GitHub proxy..."
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            --proxy "http://proxy.github.com:8080" \
+            "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=${MESSAGE}")
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          echo "HTTP Code: $HTTP_CODE"
+          echo "Response: $BODY"
+          
+          if [ "$HTTP_CODE" -eq 200 ]; then
+            echo "✅ Message sent successfully!"
+          else
+            echo "❌ Failed with proxy, trying without proxy..."
+            
+            # Try without proxy
+            RESPONSE2=$(curl -s -w "\n%{http_code}" -X POST \
+              "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+              -d "chat_id=${CHAT_ID}" \
+              -d "text=${MESSAGE}")
+            
+            HTTP_CODE2=$(echo "$RESPONSE2" | tail -n1)
+            BODY2=$(echo "$RESPONSE2" | sed '$d')
+            
+            echo "HTTP Code (no proxy): $HTTP_CODE2"
+            echo "Response (no proxy): $BODY2"
+            
+            if [ "$HTTP_CODE2" -eq 200 ]; then
+              echo "✅ Message sent successfully without proxy!"
+            else
+              echo "❌ Both attempts failed"
+              exit 1
+            fi
+          fi
