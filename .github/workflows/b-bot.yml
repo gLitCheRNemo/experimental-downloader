@@ -33,6 +33,11 @@ on:
         description: '💬 Bale Chat ID'
         required: true
         type: string
+      delay_seconds:
+        description: '⏱️ Delay between sending parts (seconds)'
+        required: false
+        type: string
+        default: '2'
 
 jobs:
   download-split-and-send:
@@ -162,6 +167,13 @@ jobs:
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
+          DELAY="${{ inputs.delay_seconds }}"
+          
+          # Validate delay is a number
+          if ! [[ "$DELAY" =~ ^[0-9]+$ ]]; then
+            echo "Invalid delay value. Using default 2 seconds."
+            DELAY=2
+          fi
           
           cd parts
           
@@ -169,6 +181,7 @@ jobs:
           TOTAL_PARTS=$(echo "$PARTS_LIST" | wc -l)
           
           echo "Found $TOTAL_PARTS parts to send"
+          echo "Delay between parts: $DELAY seconds"
           PART_NUM=1
           FAILED_PARTS=""
           
@@ -180,7 +193,7 @@ jobs:
             echo "📤 Sending part $PART_NUM of $TOTAL_PARTS: $part (${FILE_SIZE_MB} MB)"
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             
-            # CORRECTED: Using sendVideo with video= instead of sendDocument with document=
+            # Using sendVideo with video= (corrected)
             RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://tapi.bale.ai/bot${TOKEN}/sendVideo" \
               -F "chat_id=${CHAT_ID}" \
               -F "video=@${part}" \
@@ -199,9 +212,10 @@ jobs:
             
             PART_NUM=$((PART_NUM + 1))
             
+            # Use custom delay before next part (except after the last part)
             if [ $PART_NUM -le $TOTAL_PARTS ]; then
-              echo "⏳ Waiting 2 seconds before next part..."
-              sleep 2
+              echo "⏳ Waiting $DELAY seconds before next part..."
+              sleep $DELAY
             fi
           done
           
@@ -210,7 +224,7 @@ jobs:
           
           # Send completion message
           if [ -z "$FAILED_PARTS" ]; then
-            MESSAGE="✅ DOWNLOAD COMPLETE!%0A%0A📹 Video: ${{ env.SAFE_NAME }}%0A📦 Total parts: ${TOTAL_PARTS}%0A🎬 Quality: ${{ inputs.quality }}%0A🔗 Source: ${{ inputs.youtube_url }}%0A%0A✨ All parts sent successfully!"
+            MESSAGE="✅ DOWNLOAD COMPLETE!%0A%0A📹 Video: ${{ env.SAFE_NAME }}%0A📦 Total parts: ${TOTAL_PARTS}%0A🎬 Quality: ${{ inputs.quality }}%0A🔗 Source: ${{ inputs.youtube_url }}%0A%0A✨ All parts sent successfully! (Delay: ${DELAY}s between parts)"
             echo "✅ All $TOTAL_PARTS parts sent successfully!"
           else
             MESSAGE="⚠️ DOWNLOAD PARTIALLY COMPLETE%0A%0A📹 Video: ${{ env.SAFE_NAME }}%0A📦 Total parts: ${TOTAL_PARTS}%0A❌ Failed parts:${FAILED_PARTS}%0A🎬 Quality: ${{ inputs.quality }}%0A🔗 Source: ${{ inputs.youtube_url }}%0A%0A⚠️ Some parts failed. Please re-run the workflow."
