@@ -26,7 +26,7 @@ on:
         type: string
         default: '45'
       bale_token:
-        description: '🤖 Bale Bot Token'
+        description: '🤖 Bale Bot Token (from BotFather)'
         required: true
         type: string
       bale_chat_id:
@@ -34,7 +34,7 @@ on:
         required: true
         type: string
       delay_seconds:
-        description: '⏱️ Delay between parts (seconds)'
+        description: '⏱️ Delay between sending parts (seconds)'
         required: false
         type: string
         default: '2'
@@ -138,39 +138,37 @@ jobs:
           
           docker stop warp || true
 
-      - name: Split video (Original Video Downloader V2 method)
+      - name: Split video into parts (Standard ZIP method)
         id: split
         run: |
           PARTS_SIZE="${{ inputs.parts_size }}"
           ORIGINAL_FILE="${{ env.FILE }}"
           SAFE_NAME="${{ env.SAFE_NAME }}"
           
-          echo "Splitting $ORIGINAL_FILE into ${PARTS_SIZE}MB parts using zip -0 -s..."
+          echo "Splitting $ORIGINAL_FILE into ${PARTS_SIZE}MB parts using standard ZIP..."
           
           mkdir -p parts
           
-          # Original method from Video Downloader V2
+          # Standard ZIP split method (like original Video Downloader V2)
           cd tmpvideos
           zip -0 -s ${PARTS_SIZE}m "../parts/${SAFE_NAME}.zip" "$ORIGINAL_FILE"
           cd ..
           
           cd parts
           
-          # Rename parts to match original format
+          # Rename parts to clean naming for easy extraction
           for part in ${SAFE_NAME}.z* ${SAFE_NAME}.zip; do
             if [ -f "$part" ]; then
               if [[ "$part" == ${SAFE_NAME}.zip ]]; then
-                # This is the .zip file - rename to video.zip
                 mv "$part" "video.zip"
               else
-                # Extract the number
                 NUM=$(echo "$part" | sed "s/${SAFE_NAME}\.z//")
                 mv "$part" "video.z$(printf "%02d" $NUM)"
               fi
             fi
           done
           
-          # Fix single-digit numbers
+          # Fix single-digit numbers (z1 -> z01)
           for part in video.z?; do
             if [ -f "$part" ]; then
               NUM=$(echo "$part" | sed 's/video\.z//')
@@ -184,8 +182,19 @@ jobs:
           echo "TOTAL_PARTS=$TOTAL_PARTS" >> $GITHUB_ENV
           echo "Total parts created: $TOTAL_PARTS"
           
-          # Debug: list all files
-          ls -lh video.z* video.zip 2>/dev/null
+          # Short README for Android users
+          cat > README.txt << 'EOF'
+📋 HOW TO EXTRACT ON ANDROID:
+
+1. Download ALL parts (.z01, .z02, ..., .zip)
+2. Open ZArchiver app
+3. Tap on video.zip
+4. Select "Extract here"
+
+The video will be restored!
+EOF
+          
+          ls -lh
 
       - name: Send parts to Bale
         run: |
@@ -196,29 +205,41 @@ jobs:
           
           cd parts
           
+          # Send README.txt first
+          if [ -f "README.txt" ]; then
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "📄 Sending README.txt with instructions..."
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+              -F "chat_id=${CHAT_ID}" \
+              -F "document=@README.txt" \
+              -F "caption=📋 Extract video.zip with ZArchiver"
+            
+            echo "✅ README.txt sent"
+            sleep $DELAY
+          fi
+          
           # Send all .z* parts
           PART_NUM=1
           FAILED=""
           
-          # Use simple loop without sort -V to avoid missing files
-          for part in video.z01 video.z02 video.z03 video.z04 video.z05 video.z06 video.z07 video.z08 video.z09 video.z10; do
-            if [ -f "$part" ]; then
-              SIZE=$(stat -c%s "$part")
-              SIZE_MB=$((SIZE / 1024 / 1024))
-              echo "Sending $part (${SIZE_MB}MB) - Part $PART_NUM/${{ env.TOTAL_PARTS }}"
-              
-              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
-                -F "chat_id=${CHAT_ID}" \
-                -F "document=@${part}" \
-                -F "caption=📹 Part $PART_NUM/${{ env.TOTAL_PARTS }} | ${SIZE_MB}MB"
-              
-              [ $? -ne 0 ] && FAILED="$FAILED $PART_NUM"
-              PART_NUM=$((PART_NUM + 1))
-              [ $PART_NUM -le ${{ env.TOTAL_PARTS }} ] && sleep $DELAY
-            fi
+          for part in $(ls video.z* 2>/dev/null | sort -V); do
+            SIZE=$(stat -c%s "$part")
+            SIZE_MB=$((SIZE / 1024 / 1024))
+            echo "Sending $part (${SIZE_MB}MB) - Part $PART_NUM/${{ env.TOTAL_PARTS }}"
+            
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+              -F "chat_id=${CHAT_ID}" \
+              -F "document=@${part}" \
+              -F "caption=📹 Part $PART_NUM/${{ env.TOTAL_PARTS }} | ${SIZE_MB}MB"
+            
+            [ $? -ne 0 ] && FAILED="$FAILED $PART_NUM"
+            PART_NUM=$((PART_NUM + 1))
+            [ $PART_NUM -le ${{ env.TOTAL_PARTS }} ] && sleep $DELAY
           done
           
-          # Also send video.zip if it exists (from original method)
+          # Send final .zip
           if [ -f "video.zip" ]; then
             SIZE=$(stat -c%s "video.zip")
             SIZE_MB=$((SIZE / 1024 / 1024))
@@ -227,7 +248,7 @@ jobs:
             curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
               -F "chat_id=${CHAT_ID}" \
               -F "document=@video.zip" \
-              -F "caption=📦 Archive index | ${SIZE_MB}MB"
+              -F "caption=✅ FINAL - Extract this file with ZArchiver | ${SIZE_MB}MB"
           fi
           
           # Completion message
