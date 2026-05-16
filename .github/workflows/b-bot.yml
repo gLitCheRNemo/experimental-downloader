@@ -141,36 +141,34 @@ jobs:
           
           echo "Splitting $ORIGINAL_FILE into ${PARTS_SIZE}MB parts..."
           
-          # Create parts directory
           mkdir -p parts
           cd tmpvideos
           
-          # Split the file
           split -b ${PARTS_SIZE}M -d "$ORIGINAL_FILE" "../parts/part_"
           
           cd ../parts
           
-          # Rename parts to have .part extension
           for part in part_*; do
             mv "$part" "${part}.part"
           done
           
-          # Count total parts
           TOTAL_PARTS=$(ls -1 *.part | wc -l)
           echo "TOTAL_PARTS=$TOTAL_PARTS" >> $GITHUB_ENV
           echo "Total parts created: $TOTAL_PARTS"
           
-          # List parts with sizes
           ls -lh *.part
 
-      - name: Send parts one by one to Bale
+      - name: Send parts one by one to Bale (with GitHub Proxy)
         run: |
+          # Set GitHub's internal proxy
+          export HTTP_PROXY="http://proxy.github.com:8080"
+          export HTTPS_PROXY="http://proxy.github.com:8080"
+          
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
           
           cd parts
           
-          # Get list of parts sorted
           PARTS_LIST=$(ls -1 part_*.part | sort -V)
           TOTAL_PARTS=$(echo "$PARTS_LIST" | wc -l)
           
@@ -178,7 +176,6 @@ jobs:
           PART_NUM=1
           FAILED_PARTS=""
           
-          # Send each part individually
           for part in $PARTS_LIST; do
             FILE_SIZE=$(stat -c%s "$part")
             FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
@@ -187,8 +184,8 @@ jobs:
             echo "📤 Sending part $PART_NUM of $TOTAL_PARTS: $part (${FILE_SIZE_MB} MB)"
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             
-            # Send to Bale using tapi.bale.ai
-            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://tapi.bale.ai/v1/bots/${TOKEN}/sendDocument" \
+            # Using tapi.bale.ai with proxy
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
               -F "chat_id=${CHAT_ID}" \
               -F "document=@${part}" \
               -F "caption=🎬 Video: ${{ env.SAFE_NAME }}%0A📦 Part: ${PART_NUM}/${TOTAL_PARTS}%0A🎚️ Quality: ${{ inputs.quality }}%0A📁 Size: ${FILE_SIZE_MB} MB%0A🔗 Source: ${{ inputs.youtube_url }}")
@@ -206,7 +203,6 @@ jobs:
             
             PART_NUM=$((PART_NUM + 1))
             
-            # Add delay between parts to avoid rate limiting
             if [ $PART_NUM -le $TOTAL_PARTS ]; then
               echo "⏳ Waiting 2 seconds before next part..."
               sleep 2
@@ -216,7 +212,7 @@ jobs:
           echo ""
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
-          # Send completion summary using tapi.bale.ai
+          # Send completion summary using tapi.bale.ai with proxy
           if [ -z "$FAILED_PARTS" ]; then
             MESSAGE="✅ DOWNLOAD COMPLETE!%0A%0A📹 Video: ${{ env.SAFE_NAME }}%0A📦 Total parts: ${TOTAL_PARTS}%0A🎬 Quality: ${{ inputs.quality }}%0A🔗 Source: ${{ inputs.youtube_url }}%0A%0A✨ All parts sent successfully!"
             echo "✅ All $TOTAL_PARTS parts sent successfully!"
@@ -225,7 +221,7 @@ jobs:
             echo "⚠️ Some parts failed: $FAILED_PARTS"
           fi
           
-          curl -s -X POST "https://tapi.bale.ai/v1/bots/${TOKEN}/sendMessage" \
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
             -d "text=${MESSAGE}"
           
