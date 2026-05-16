@@ -1,4 +1,4 @@
-name: B Bot
+name: B Bot OG
 
 on:
   workflow_dispatch:
