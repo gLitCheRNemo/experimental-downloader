@@ -146,14 +146,14 @@ jobs:
           
           mkdir -p parts
           
-          # Create a split ZIP archive (like the original downloader)
+          # Create a split ZIP archive (creates .z01, .z02, ..., .zip)
           cd tmpvideos
           zip -s ${PARTS_SIZE}m -r ../parts/video_split.zip "$ORIGINAL_FILE"
           cd ..
           
           cd parts
           
-          # Rename parts to match original format: video.z01, video.z02, ..., video.zip
+          # Rename parts to video.z01, video.z02, ..., video.zip
           for part in video_split.z* video_split.zip; do
             if [ -f "$part" ]; then
               if [[ "$part" == video_split.zip ]]; then
@@ -181,12 +181,48 @@ jobs:
           
           ls -lh video.z* video.zip 2>/dev/null
 
-      - name: Send parts to Bale
+      - name: Send parts to Bale with Retry
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
           DELAY="${{ inputs.delay_seconds }}"
           [[ ! "$DELAY" =~ ^[0-9]+$ ]] && DELAY=2
+          
+          # Retry function for sending parts
+          send_with_retry() {
+            local file="$1"
+            local caption="$2"
+            local max_retries=3
+            local attempt=1
+            
+            while [ $attempt -le $max_retries ]; do
+              echo "  Attempt $attempt of $max_retries..."
+              
+              RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+                -F "chat_id=${CHAT_ID}" \
+                -F "document=@${file}" \
+                -F "caption=${caption}")
+              
+              HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+              
+              if [ "$HTTP_CODE" -eq 200 ]; then
+                echo "  ✅ Sent successfully on attempt $attempt"
+                return 0
+              else
+                echo "  ❌ Failed with HTTP $HTTP_CODE (attempt $attempt)"
+                if [ $attempt -lt $max_retries ]; then
+                  sleep_time=$((2 ** attempt))
+                  echo "  ⏳ Retrying in $sleep_time seconds..."
+                  sleep $sleep_time
+                fi
+              fi
+              
+              attempt=$((attempt + 1))
+            done
+            
+            echo "  ❌ Failed after $max_retries attempts"
+            return 1
+          }
           
           cd parts
           
@@ -196,29 +232,40 @@ jobs:
           for part in $(ls video.z* 2>/dev/null | sort -V); do
             SIZE=$(stat -c%s "$part")
             SIZE_MB=$((SIZE / 1024 / 1024))
-            echo "Sending $part (${SIZE_MB}MB) - $PART_NUM/${{ env.TOTAL_PARTS }}"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "📤 Sending $part (${SIZE_MB}MB) - Part $PART_NUM/${{ env.TOTAL_PARTS }}"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
-              -F "chat_id=${CHAT_ID}" \
-              -F "document=@${part}" \
-              -F "caption=📹 Part $PART_NUM/${{ env.TOTAL_PARTS }} | ${SIZE_MB}MB"
+            CAPTION="📹 Part $PART_NUM/${{ env.TOTAL_PARTS }} | ${SIZE_MB}MB"
             
-            [ $? -ne 0 ] && FAILED="$FAILED $PART_NUM"
+            if send_with_retry "$part" "$CAPTION"; then
+              echo "✅ Part $PART_NUM completed"
+            else
+              echo "❌ Part $PART_NUM failed permanently"
+              FAILED="$FAILED $PART_NUM"
+            fi
+            
             PART_NUM=$((PART_NUM + 1))
             [ $PART_NUM -le ${{ env.TOTAL_PARTS }} ] && sleep $DELAY
           done
           
-          # Send final .zip last
+          # Send final .zip last with retry
           if [ -f "video.zip" ]; then
             SIZE=$(stat -c%s "video.zip")
             SIZE_MB=$((SIZE / 1024 / 1024))
-            echo "Sending final video.zip (${SIZE_MB}MB)"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "📤 Sending final video.zip (${SIZE_MB}MB)"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
-              -F "chat_id=${CHAT_ID}" \
-              -F "document=@video.zip" \
-              -F "caption=✅ FINAL - Extract this file with 7-Zip | ${SIZE_MB}MB"
+            CAPTION="✅ FINAL - Extract this file with 7-Zip | ${SIZE_MB}MB"
+            
+            if ! send_with_retry "video.zip" "$CAPTION"; then
+              FAILED="$FAILED final"
+            fi
           fi
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
           # Completion message
           if [ -z "$FAILED" ]; then
