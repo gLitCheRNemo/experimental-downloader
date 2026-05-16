@@ -132,140 +132,103 @@ jobs:
           yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" $FORMAT_OPTS "${{ inputs.youtube_url }}"
 
           FILE=$(ls -1 | head -n 1)
+          SAFE_NAME=$(echo "$FILE" | sed 's/^[[:space:]]*//' | tr ' ' '_')
           echo "FILE=$FILE" >> $GITHUB_ENV
+          echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
           
           docker stop warp || true
 
-      - name: Split video into parts (Original ZIP method)
+      - name: Split video (Original Video Downloader V2 method)
         id: split
         run: |
           PARTS_SIZE="${{ inputs.parts_size }}"
           ORIGINAL_FILE="${{ env.FILE }}"
+          SAFE_NAME="${{ env.SAFE_NAME }}"
           
-          echo "Splitting $ORIGINAL_FILE into ${PARTS_SIZE}MB parts using zip..."
+          echo "Splitting $ORIGINAL_FILE into ${PARTS_SIZE}MB parts using zip -0 -s..."
           
           mkdir -p parts
           
-          # Create a split ZIP archive (creates .z01, .z02, ..., .zip)
+          # Original method from Video Downloader V2
           cd tmpvideos
-          zip -s ${PARTS_SIZE}m -r ../parts/video_split.zip "$ORIGINAL_FILE"
+          zip -0 -s ${PARTS_SIZE}m "../parts/${SAFE_NAME}.zip" "$ORIGINAL_FILE"
           cd ..
           
           cd parts
           
-          # Rename parts to video.z01, video.z02, ..., video.zip
-          for part in video_split.z* video_split.zip; do
+          # Rename parts to match original format
+          for part in ${SAFE_NAME}.z* ${SAFE_NAME}.zip; do
             if [ -f "$part" ]; then
-              if [[ "$part" == video_split.zip ]]; then
+              if [[ "$part" == ${SAFE_NAME}.zip ]]; then
+                # This is the .zip file - rename to video.zip
                 mv "$part" "video.zip"
               else
-                NUM=$(echo "$part" | grep -o 'z[0-9]*' | sed 's/z//')
+                # Extract the number
+                NUM=$(echo "$part" | sed "s/${SAFE_NAME}\.z//")
                 mv "$part" "video.z$(printf "%02d" $NUM)"
               fi
             fi
           done
           
-          # Fix single-digit numbers (z1 -> z01)
+          # Fix single-digit numbers
           for part in video.z?; do
             if [ -f "$part" ]; then
-              NUM=$(echo "$part" | grep -o 'z[0-9]' | sed 's/z//')
+              NUM=$(echo "$part" | sed 's/video\.z//')
               if [ ${#NUM} -eq 1 ]; then
                 mv "$part" "video.z0${NUM}"
               fi
             fi
           done
           
-          TOTAL_PARTS=$(ls -1 video.z* video.zip 2>/dev/null | wc -l)
+          TOTAL_PARTS=$(ls -1 video.z* 2>/dev/null | wc -l)
           echo "TOTAL_PARTS=$TOTAL_PARTS" >> $GITHUB_ENV
           echo "Total parts created: $TOTAL_PARTS"
           
+          # Debug: list all files
           ls -lh video.z* video.zip 2>/dev/null
 
-      - name: Send parts to Bale with Retry
+      - name: Send parts to Bale
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
           DELAY="${{ inputs.delay_seconds }}"
           [[ ! "$DELAY" =~ ^[0-9]+$ ]] && DELAY=2
           
-          # Retry function for sending parts
-          send_with_retry() {
-            local file="$1"
-            local caption="$2"
-            local max_retries=3
-            local attempt=1
-            
-            while [ $attempt -le $max_retries ]; do
-              echo "  Attempt $attempt of $max_retries..."
-              
-              RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
-                -F "chat_id=${CHAT_ID}" \
-                -F "document=@${file}" \
-                -F "caption=${caption}")
-              
-              HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-              
-              if [ "$HTTP_CODE" -eq 200 ]; then
-                echo "  ✅ Sent successfully on attempt $attempt"
-                return 0
-              else
-                echo "  ❌ Failed with HTTP $HTTP_CODE (attempt $attempt)"
-                if [ $attempt -lt $max_retries ]; then
-                  sleep_time=$((2 ** attempt))
-                  echo "  ⏳ Retrying in $sleep_time seconds..."
-                  sleep $sleep_time
-                fi
-              fi
-              
-              attempt=$((attempt + 1))
-            done
-            
-            echo "  ❌ Failed after $max_retries attempts"
-            return 1
-          }
-          
           cd parts
           
-          # Send .z* parts first
+          # Send all .z* parts
           PART_NUM=1
           FAILED=""
-          for part in $(ls video.z* 2>/dev/null | sort -V); do
-            SIZE=$(stat -c%s "$part")
-            SIZE_MB=$((SIZE / 1024 / 1024))
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "📤 Sending $part (${SIZE_MB}MB) - Part $PART_NUM/${{ env.TOTAL_PARTS }}"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            
-            CAPTION="📹 Part $PART_NUM/${{ env.TOTAL_PARTS }} | ${SIZE_MB}MB"
-            
-            if send_with_retry "$part" "$CAPTION"; then
-              echo "✅ Part $PART_NUM completed"
-            else
-              echo "❌ Part $PART_NUM failed permanently"
-              FAILED="$FAILED $PART_NUM"
+          
+          # Use simple loop without sort -V to avoid missing files
+          for part in video.z01 video.z02 video.z03 video.z04 video.z05 video.z06 video.z07 video.z08 video.z09 video.z10; do
+            if [ -f "$part" ]; then
+              SIZE=$(stat -c%s "$part")
+              SIZE_MB=$((SIZE / 1024 / 1024))
+              echo "Sending $part (${SIZE_MB}MB) - Part $PART_NUM/${{ env.TOTAL_PARTS }}"
+              
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+                -F "chat_id=${CHAT_ID}" \
+                -F "document=@${part}" \
+                -F "caption=📹 Part $PART_NUM/${{ env.TOTAL_PARTS }} | ${SIZE_MB}MB"
+              
+              [ $? -ne 0 ] && FAILED="$FAILED $PART_NUM"
+              PART_NUM=$((PART_NUM + 1))
+              [ $PART_NUM -le ${{ env.TOTAL_PARTS }} ] && sleep $DELAY
             fi
-            
-            PART_NUM=$((PART_NUM + 1))
-            [ $PART_NUM -le ${{ env.TOTAL_PARTS }} ] && sleep $DELAY
           done
           
-          # Send final .zip last with retry
+          # Also send video.zip if it exists (from original method)
           if [ -f "video.zip" ]; then
             SIZE=$(stat -c%s "video.zip")
             SIZE_MB=$((SIZE / 1024 / 1024))
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "📤 Sending final video.zip (${SIZE_MB}MB)"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "Sending video.zip (${SIZE_MB}MB)"
             
-            CAPTION="✅ FINAL - Extract this file with 7-Zip | ${SIZE_MB}MB"
-            
-            if ! send_with_retry "video.zip" "$CAPTION"; then
-              FAILED="$FAILED final"
-            fi
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+              -F "chat_id=${CHAT_ID}" \
+              -F "document=@video.zip" \
+              -F "caption=📦 Archive index | ${SIZE_MB}MB"
           fi
-          
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
           # Completion message
           if [ -z "$FAILED" ]; then
