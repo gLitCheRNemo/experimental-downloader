@@ -1,0 +1,23 @@
+name: Bale Ping Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      bale_token:
+        description: 'Bale Bot Token'
+        required: true
+        type: string
+      bale_chat_id:
+        description: 'Bale Chat ID'
+        required: true
+        type: string
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send ping
+        run: |
+          curl -X POST "https://tapi.bale.ai/bot${{ inputs.bale_token }}/sendMessage" \
+            -d "chat_id=${{ inputs.bale_chat_id }}" \
+            -d "text=Ping from GitHub"
