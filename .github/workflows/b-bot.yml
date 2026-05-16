@@ -1,0 +1,124 @@
+name: B Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      youtube_url:
+        description: '🔗 YouTube video URL'
+        required: true
+        type: string
+      quality:
+        description: '🎬 Video quality'
+        required: true
+        default: 'best'
+        type: choice
+        options:
+          - best
+          - 1080
+          - 720
+          - 480
+          - audio
+      bale_token:
+        description: '🤖 Bale Bot Token (from BotFather)'
+        required: true
+        type: string
+      bale_chat_id:
+        description: '💬 Bale Chat ID (from getUpdates)'
+        required: true
+        type: string
+      start_time:
+        description: '⏱️ Start time (optional, e.g., 01:23:45)'
+        required: false
+        type: string
+        default: ''
+      end_time:
+        description: '🏁 End time (optional, e.g., 01:30:00)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  download-and-send:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Mask sensitive inputs
+        run: |
+          echo "::add-mask::${{ inputs.bale_token }}"
+          echo "::add-mask::${{ inputs.bale_chat_id }}"
+
+      - name: Setup FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Setup yt-dlp
+        run: |
+          pip install yt-dlp
+
+      - name: Download video
+        id: download
+        run: |
+          QUALITY="${{ inputs.quality }}"
+          
+          if [ "$QUALITY" = "audio" ]; then
+            FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
+            EXTENSION="mp3"
+          else
+            FORMAT_OPTS="-f bestvideo+bestaudio/best --merge-output-format mp4"
+            EXTENSION="mp4"
+          fi
+
+          # Time range logic
+          SECTION_ARG=""
+          START="${{ inputs.start_time }}"
+          END="${{ inputs.end_time }}"
+          
+          if [ -n "$START" ] && [ -n "$END" ]; then
+            SECTION_ARG="--download-sections \"*${START}-${END}\" --force-keyframes-at-cuts"
+            echo "Downloading section: ${START} to ${END}"
+          elif [ -n "$START" ]; then
+            SECTION_ARG="--download-sections \"*${START}-\" --force-keyframes-at-cuts"
+            echo "Downloading from: ${START}"
+          elif [ -n "$END" ]; then
+            SECTION_ARG="--download-sections \"*-${END}\" --force-keyframes-at-cuts"
+            echo "Downloading until: ${END}"
+          fi
+
+          # Download
+          yt-dlp $SECTION_ARG $FORMAT_OPTS \
+            -o "video.%(ext)s" \
+            "${{ inputs.youtube_url }}"
+
+          # Get the downloaded filename
+          FILE=$(ls video.* 2>/dev/null | head -n 1)
+          if [ -z "$FILE" ]; then
+            echo "ERROR: No file downloaded!"
+            exit 1
+          fi
+          
+          echo "DOWNLOADED_FILE=$FILE" >> $GITHUB_ENV
+          echo "File downloaded: $FILE"
+
+      - name: Send to Bale
+        run: |
+          TOKEN="${{ inputs.bale_token }}"
+          CHAT_ID="${{ inputs.bale_chat_id }}"
+          FILE="${{ env.DOWNLOADED_FILE }}"
+          
+          # Get file size
+          FILE_SIZE=$(stat -c%s "$FILE")
+          echo "File size: $FILE_SIZE bytes"
+          
+          # Send video/document to Bale
+          curl -s -X POST "https://api.bale.ai/v1/bots/${TOKEN}/sendDocument" \
+            -F "chat_id=${CHAT_ID}" \
+            -F "document=@${FILE}" \
+            -F "caption=✅ Downloaded from YouTube%0A%0A🔗 ${{ inputs.youtube_url }}%0A🎬 Quality: ${{ inputs.quality }}"
+          
+          echo "✅ Video sent to Bale!"
+
+      - name: Cleanup
+        run: |
+          rm -f video.*
+          echo "🧹 Cleaned up temporary files"
