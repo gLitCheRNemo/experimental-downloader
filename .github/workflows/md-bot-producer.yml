@@ -1,0 +1,135 @@
+name: 1- MD Bot - Producer
+
+on:
+  workflow_dispatch:
+    inputs:
+      magnet_link:
+        description: Magnet link or torrent URL
+        required: true
+        type: string
+      parts_size:
+        description: Parts size in MB
+        required: false
+        type: string
+        default: '45'
+      bale_token:
+        description: Bale Bot Token
+        required: true
+        type: string
+      bale_chat_id:
+        description: Bale Chat ID
+        required: true
+        type: string
+
+jobs:
+  produce:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Mask sensitive inputs
+        run: |
+          echo "::add-mask::${{ inputs.bale_token }}"
+          echo "::add-mask::${{ inputs.bale_chat_id }}"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip aria2 zip p7zip-full
+          pip install yt-dlp
+
+      - name: Download torrent
+        id: download
+        run: |
+          MAGNET="${{ inputs.magnet_link }}"
+          mkdir -p downloads
+          cd downloads
+          
+          # Use aria2 to download magnet link
+          aria2c --seed-time=0 --max-connection-per-server=16 --split=16 --console-log-level=error "$MAGNET"
+          
+          # Find the downloaded file
+          FILE=$(ls -1 | head -n 1)
+          SAFE_NAME=$(echo "$FILE" | sed 's/ /_/g' | sed 's/[^a-zA-Z0-9._-]/_/g')
+          echo "FILE=$FILE" >> $GITHUB_ENV
+          echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
+          
+          cd ..
+
+      - name: Split file into parts
+        id: split
+        run: |
+          PARTS_SIZE="${{ inputs.parts_size }}"
+          SAFE_NAME="${{ env.SAFE_NAME }}"
+          FILE_PATH="downloads/${{ env.FILE }}"
+          FILE_SIZE=$(stat -c%s "$FILE_PATH")
+          FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
+          
+          mkdir -p tmpzip
+          
+          if [ $FILE_SIZE_MB -le $PARTS_SIZE ]; then
+            echo "File is smaller than split size. Creating single ZIP."
+            zip -0 "tmpzip/${SAFE_NAME}.zip" "$FILE_PATH"
+            echo "SINGLE_FILE=true" >> $GITHUB_ENV
+          else
+            echo "File is larger than split size. Creating split ZIP."
+            cd downloads
+            zip -r -0 -s ${PARTS_SIZE}m "../tmpzip/${SAFE_NAME}.zip" "."
+            cd ..
+            cd tmpzip
+            TOTAL_PARTS=$(ls -1 ${SAFE_NAME}.z* 2>/dev/null | wc -l)
+            echo "TOTAL_PARTS=$TOTAL_PARTS" >> $GITHUB_ENV
+            echo "SINGLE_FILE=false" >> $GITHUB_ENV
+            cd ..
+          fi
+
+      - name: Create persistent branch
+        run: |
+          BRANCH_NAME="md-parts-$(date +'%Y%m%d-%H%M%S')"
+          echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git checkout --orphan $BRANCH_NAME
+          git rm -rf . || true
+          cp -r tmpzip/* . 2>/dev/null || true
+          git add .
+          git commit -m "File parts for ${{ env.SAFE_NAME }}"
+          git push origin $BRANCH_NAME
+
+      - name: Send completion message
+        run: |
+          TOKEN="${{ inputs.bale_token }}"
+          CHAT_ID="${{ inputs.bale_chat_id }}"
+          BRANCH_NAME="${{ env.BRANCH_NAME }}"
+          SAFE_NAME="${{ env.SAFE_NAME }}"
+          TOTAL_PARTS="${{ env.TOTAL_PARTS }}"
+          REPO="${{ github.repository }}"
+          
+          if [ "${{ env.SINGLE_FILE }}" = "true" ]; then
+            MESSAGE="✅ File ready: ${SAFE_NAME}%0A%0A"
+            MESSAGE="${MESSAGE}Download: https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${SAFE_NAME}.zip"
+          else
+            MESSAGE="✅ File ready: ${SAFE_NAME}%0A%0A"
+            MESSAGE="${MESSAGE}Total parts: ${TOTAL_PARTS}%0A"
+            MESSAGE="${MESSAGE}Branch: ${BRANCH_NAME}%0A%0A"
+            MESSAGE="${MESSAGE}To download all parts:%0A"
+            MESSAGE="${MESSAGE}https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${SAFE_NAME}.z01%0A"
+            MESSAGE="${MESSAGE}...%0A"
+            MESSAGE="${MESSAGE}https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${SAFE_NAME}.zip%0A%0A"
+            MESSAGE="${MESSAGE}If a part is missing, use MD Bot - Resender%0A"
+            MESSAGE="${MESSAGE}Branch: ${BRANCH_NAME}%0A"
+            MESSAGE="${MESSAGE}Part number: (e.g., 5)%0A%0A"
+            MESSAGE="${MESSAGE}⚠️ Run MD Bot - Cleanup when done to delete this branch."
+          fi
+          
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=${MESSAGE}"
+
+      - name: Cleanup local files
+        run: rm -rf downloads tmpzip
