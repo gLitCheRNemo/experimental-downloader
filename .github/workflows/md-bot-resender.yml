@@ -3,8 +3,12 @@ name: 2- MD Bot - Resender
 on:
   workflow_dispatch:
     inputs:
-      part_number:
-        description: Missing part number (e.g., 15 for .z15, or "final" for .zip)
+      branch_name:
+        description: Branch name (e.g., md-parts-20260517-143000)
+        required: true
+        type: string
+      part_numbers:
+        description: Part numbers (e.g., 5 12 18 for .z05 .z12 .z18, or "final" for .zip)
         required: true
         type: string
       bale_token:
@@ -27,64 +31,73 @@ jobs:
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
 
-      - name: Fetch README and file list from branch
+      - name: Fetch file list from branch
         run: |
-          BRANCH_NAME="md-parts"
+          BRANCH="${{ inputs.branch_name }}"
           REPO="${{ github.repository }}"
           
-          # Clone just the branch
-          git clone --depth 1 --branch $BRANCH_NAME "https://github.com/${REPO}.git" branch_files
+          # Clone just the branch to see all files
+          git clone --depth 1 --branch $BRANCH "https://github.com/${REPO}.git" branch_files
           cd branch_files
           echo "Files in branch:"
           ls -la
           
-          # Read the README to find all files
-          echo ""
-          echo "README.md contents:"
-          cat README.md 2>/dev/null || echo "No README.md found"
-          cd ..
-          
           # Find the base name (e.g., video_name)
-          BASE_NAME=$(ls branch_files | grep -v README.md | grep '\.z' | head -1 | sed 's/\.z[0-9][0-9]$//')
+          BASE_NAME=$(ls | grep -v README.md | grep '\.z' | head -1 | sed 's/\.z[0-9][0-9]$//')
           echo "BASE_NAME=$BASE_NAME" >> $GITHUB_ENV
+          cd ..
 
-      - name: Resend missing part
+      - name: Resend missing parts
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
-          PART_NUM="${{ inputs.part_number }}"
-          BRANCH_NAME="md-parts"
+          BRANCH="${{ inputs.branch_name }}"
           REPO="${{ github.repository }}"
           BASE_NAME="${{ env.BASE_NAME }}"
+          PART_NUMBERS="${{ inputs.part_numbers }}"
           
-          # Determine which file to fetch
-          if [ "$PART_NUM" = "final" ] || [ "$PART_NUM" = "0" ]; then
-            FILE_NAME="${BASE_NAME}.zip"
-            CAPTION="📦 FINAL PART (Extract this file)"
-          else
-            PART_NUM_PADDED=$(printf "%02d" $PART_NUM)
-            FILE_NAME="${BASE_NAME}.z${PART_NUM_PADDED}"
-            CAPTION="📦 Missing Part ${PART_NUM}"
-          fi
+          # Send header message
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=📦 Resending missing parts from branch: ${BRANCH}"
           
-          RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${FILE_NAME}"
-          
-          echo "Downloading: $FILE_NAME from $RAW_URL"
-          curl -L -o "$FILE_NAME" "$RAW_URL"
-          
-          if [ ! -f "$FILE_NAME" ]; then
-            echo "ERROR: Failed to download $FILE_NAME"
-            exit 1
-          fi
-          
-          SIZE=$(stat -c%s "$FILE_NAME")
-          SIZE_MB=$((SIZE / 1024 / 1024))
-          
-          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
-            -F "chat_id=${CHAT_ID}" \
-            -F "document=@${FILE_NAME}" \
-            -F "caption=${CAPTION} | ${SIZE_MB} MB"
+          # Process each part number
+          for PART_NUM in $PART_NUMBERS; do
+            if [ "$PART_NUM" = "final" ] || [ "$PART_NUM" = "0" ]; then
+              FILE_NAME="${BASE_NAME}.zip"
+              CAPTION="📦 FINAL PART (Extract this file)"
+            else
+              PART_NUM_PADDED=$(printf "%02d" $PART_NUM)
+              FILE_NAME="${BASE_NAME}.z${PART_NUM_PADDED}"
+              CAPTION="📦 Missing Part ${PART_NUM}"
+            fi
+            
+            RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/${FILE_NAME}"
+            
+            echo "Downloading: $FILE_NAME"
+            curl -L -o "$FILE_NAME" "$RAW_URL"
+            
+            if [ -f "$FILE_NAME" ]; then
+              SIZE=$(stat -c%s "$FILE_NAME")
+              SIZE_MB=$((SIZE / 1024 / 1024))
+              
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+                -F "chat_id=${CHAT_ID}" \
+                -F "document=@${FILE_NAME}" \
+                -F "caption=${CAPTION} | ${SIZE_MB} MB"
+              
+              echo "✅ Sent $FILE_NAME"
+              rm -f "$FILE_NAME"
+            else
+              echo "❌ Failed to download $FILE_NAME"
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+                -d "chat_id=${CHAT_ID}" \
+                -d "text=❌ Part ${PART_NUM} not found in branch"
+            fi
+            
+            sleep 1
+          done
           
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            -d "text=✅ ${FILE_NAME} sent!"
+            -d "text=✅ Done resending requested parts."
