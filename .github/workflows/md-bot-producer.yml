@@ -188,13 +188,13 @@ jobs:
           
           # Create README.md at root with download links
           cat > README.md << EOF
-# Download Links - ${SAFE_NAME}
+          # Download Links - ${SAFE_NAME}
 
-Generated on: $(date)
+          Generated on: $(date)
 
-## Files in this branch:
+          ## Files in this branch:
 
-EOF
+          EOF
           
           for file in *; do
             if [ -f "$file" ] && [ "$file" != "README.md" ]; then
@@ -205,12 +205,12 @@ EOF
           
           cat >> README.md << EOF
 
-## Missing a part?
+          ## Missing a part?
 
-Run the **MD Bot - Resender** workflow with:
-- Branch name: \`${BRANCH_NAME}\`
-- Part numbers: (e.g., \`5 12 18\` or \`final\`)
-EOF
+          Run the **MD Bot - Resender** workflow with:
+          - Branch name: \`${BRANCH_NAME}\`
+          - Part numbers: (e.g., \`5 12 18\` or \`final\`)
+          EOF
           
           # Add all files
           git add .
