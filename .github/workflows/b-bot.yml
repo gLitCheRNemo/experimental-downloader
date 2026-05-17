@@ -117,14 +117,11 @@ jobs:
           PARTS_SIZE="${{ inputs.parts_size }}"
           ORIGINAL_FILE="${{ env.FILE }}"
           SAFE_NAME="${{ env.SAFE_NAME }}"
-          
           mkdir -p parts
           cd tmpvideos
-          
           FILE_SIZE=$(stat -c%s "$ORIGINAL_FILE")
           FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
           SPLIT_SIZE_MB=$((PARTS_SIZE))
-          
           if [ $FILE_SIZE_MB -le $SPLIT_SIZE_MB ]; then
             echo "File is ${FILE_SIZE_MB}MB, smaller than split size (${SPLIT_SIZE_MB}MB). Copying directly."
             cp "$ORIGINAL_FILE" "../parts/${SAFE_NAME}.mp4"
@@ -138,16 +135,13 @@ jobs:
             TOTAL_PARTS=$(ls -1 ${SAFE_NAME}.z* ${SAFE_NAME}.zip 2>/dev/null | wc -l)
             echo "TOTAL_PARTS=$TOTAL_PARTS" >> $GITHUB_ENV
           fi
-          
           cd ../parts
-          
           cat > README.txt << 'EOF'
 HOW TO EXTRACT:
 1. Download ALL files to the same folder
 2. If you have a .zip file, extract it with ZArchiver/7-Zip
 3. If you have a single .mp4 file, just play it directly
 EOF
-          
           ls -lh
 
       - name: Send parts to Bale
@@ -160,7 +154,6 @@ EOF
           fi
           cd parts
           SAFE_NAME="${{ env.SAFE_NAME }}"
-          
           if [ -f "README.txt" ]; then
             curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
               -F "chat_id=${CHAT_ID}" \
@@ -168,9 +161,7 @@ EOF
               -F "caption=HOW TO EXTRACT: Read this file"
             sleep $DELAY
           fi
-          
           if [ "${{ env.SINGLE_FILE }}" = "true" ]; then
-            # Send single mp4 file
             if [ -f "${SAFE_NAME}.mp4" ]; then
               SIZE=$(stat -c%s "${SAFE_NAME}.mp4")
               SIZE_MB=$((SIZE / 1024 / 1024))
@@ -181,7 +172,6 @@ EOF
                 -F "caption=Video: ${SAFE_NAME} | ${SIZE_MB}MB"
             fi
           else
-            # Send split parts
             PART_NUM=1
             FAILED=""
             for part in $(ls ${SAFE_NAME}.z* 2>/dev/null | sort -V); do
@@ -212,7 +202,6 @@ EOF
               exit 1
             fi
           fi
-          
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
             -d "text=Done! Delay: ${DELAY}s"
