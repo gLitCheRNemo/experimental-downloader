@@ -110,30 +110,50 @@ jobs:
           echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
           docker stop warp || true
 
-      - name: Split video
+      - name: Split video into parts
         id: split
         run: |
           PARTS_SIZE="${{ inputs.parts_size }}"
           SAFE_NAME="${{ env.SAFE_NAME }}"
+          
+          echo "Splitting video into ${PARTS_SIZE}MB parts..."
+          
+          # Create a clean parts folder
+          rm -rf parts
           mkdir -p parts
-          rm -rf tmpzip
-          mkdir tmpzip
+          
           cd tmpvideos
-          zip -r -0 -s ${PARTS_SIZE}m "../tmpzip/${SAFE_NAME}.zip" "."
+          
+          # Create split ZIP archive directly into the parts folder
+          # This creates: video_name.z01, video_name.z02, ..., video_name.zip
+          zip -r -0 -s ${PARTS_SIZE}m "../parts/${SAFE_NAME}.zip" "."
+          
+          if [ $? -ne 0 ]; then
+            echo "ERROR: zip command failed!"
+            exit 1
+          fi
+          
           cd ..
-          cd tmpzip
-          mv ${SAFE_NAME}.z* ${SAFE_NAME}.zip ../parts/ 2>/dev/null || true
-          cd ../parts
-          TOTAL_PARTS=$(ls -1 ${SAFE_NAME}.z* ${SAFE_NAME}.zip 2>/dev/null | wc -l)
+          
+          # Verify and list files in parts folder
+          cd parts
+          echo "Files in parts folder:"
+          ls -la
+          
+          # Count the number of split parts (excluding the final .zip)
+          if ls ${SAFE_NAME}.z* 1> /dev/null 2>&1; then
+            TOTAL_PARTS=$(ls -1 ${SAFE_NAME}.z* | wc -l)
+            echo "SINGLE_FILE=false" >> $GITHUB_ENV
+          else
+            TOTAL_PARTS=1
+            echo "SINGLE_FILE=true" >> $GITHUB_ENV
+          fi
+          
           echo "TOTAL_PARTS=$TOTAL_PARTS" >> $GITHUB_ENV
-          cat > README.txt << 'EOF'
-HOW TO EXTRACT:
-1. Download ALL parts to the same folder
-2. Extract the .zip file with ZArchiver
-3. The video will be restored automatically
-EOF
+          echo "Total parts created: $TOTAL_PARTS"
+          ls -lh
 
-      - name: Send to Bale
+      - name: Send files to Bale
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
@@ -141,35 +161,77 @@ EOF
           if ! [[ "$DELAY" =~ ^[0-9]+$ ]]; then
             DELAY=2
           fi
+          
           cd parts
           SAFE_NAME="${{ env.SAFE_NAME }}"
-          if [ -f "README.txt" ]; then
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" -F "chat_id=${CHAT_ID}" -F "document=@README.txt" -F "caption=Extract the .zip file with ZArchiver"
-            sleep $DELAY
-          fi
-          PART_NUM=1
+          VIDEO_NAME=$(echo "$SAFE_NAME" | sed 's/_/ /g')
+          
+          # Send video name with down arrow
+          echo "Sending video title: $VIDEO_NAME"
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=${VIDEO_NAME}%0A⬇️"
+          
+          # Send all files from the parts folder one by one
+          ALL_FILES=$(ls -1 | sort -V)
+          TOTAL_FILES=$(echo "$ALL_FILES" | wc -l)
+          FILE_NUM=1
           FAILED=""
-          for part in $(ls ${SAFE_NAME}.z* 2>/dev/null | sort -V); do
-            SIZE=$(stat -c%s "$part")
-            SIZE_MB=$((SIZE / 1024 / 1024))
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" -F "chat_id=${CHAT_ID}" -F "document=@${part}" -F "caption=Part $PART_NUM | ${SIZE_MB}MB"
-            if [ $? -ne 0 ]; then
-              FAILED="$FAILED $PART_NUM"
+          
+          echo "Found $TOTAL_FILES files to send"
+          
+          for file in $ALL_FILES; do
+            if [ -f "$file" ]; then
+              SIZE=$(stat -c%s "$file")
+              SIZE_MB=$((SIZE / 1024 / 1024))
+              
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo "Sending file $FILE_NUM of $TOTAL_FILES: $file (${SIZE_MB} MB)"
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              
+              # Determine caption based on file type
+              if [[ "$file" == *.zip ]] && [ "$TOTAL_FILES" -gt 1 ]; then
+                CAPTION="FINAL - Extract this file | ${SIZE_MB}MB"
+              elif [[ "$file" == *.zip ]]; then
+                CAPTION="${VIDEO_NAME} | ${SIZE_MB}MB"
+              else
+                CAPTION="Part $FILE_NUM of $TOTAL_FILES | ${SIZE_MB}MB"
+              fi
+              
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+                -F "chat_id=${CHAT_ID}" \
+                -F "document=@${file}" \
+                -F "caption=${CAPTION}"
+              
+              if [ $? -ne 0 ]; then
+                FAILED="$FAILED $file"
+              fi
+              
+              FILE_NUM=$((FILE_NUM + 1))
+              
+              if [ $FILE_NUM -le $TOTAL_FILES ]; then
+                echo "Waiting $DELAY seconds before next file..."
+                sleep $DELAY
+              fi
             fi
-            PART_NUM=$((PART_NUM + 1))
-            sleep $DELAY
           done
-          if [ -f "${SAFE_NAME}.zip" ]; then
-            SIZE=$(stat -c%s "${SAFE_NAME}.zip")
-            SIZE_MB=$((SIZE / 1024 / 1024))
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" -F "chat_id=${CHAT_ID}" -F "document=@${SAFE_NAME}.zip" -F "caption=FINAL - Extract this file | ${SIZE_MB}MB"
-          fi
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # Send completion message
           if [ -z "$FAILED" ]; then
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" -d "chat_id=${CHAT_ID}" -d "text=Done! Delay: ${DELAY}s"
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+              -d "chat_id=${CHAT_ID}" \
+              -d "text=Done! $TOTAL_FILES files sent. Delay: ${DELAY}s"
+            echo "✅ All $TOTAL_FILES files sent successfully!"
           else
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" -d "chat_id=${CHAT_ID}" -d "text=Partial failure. Failed parts:$FAILED"
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+              -d "chat_id=${CHAT_ID}" \
+              -d "text=Partial failure. Failed files:$FAILED"
+            echo "❌ Some files failed: $FAILED"
             exit 1
           fi
 
       - name: Cleanup
-        run: rm -rf tmpvideos parts tmpzip
+        run: rm -rf tmpvideos parts
