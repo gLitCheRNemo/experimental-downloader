@@ -25,12 +25,12 @@ jobs:
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
 
-      - name: Download files from raw links
+      - name: Download files using wget (matching wget-downloader.yml)
         run: |
           mkdir -p downloaded_files
           cd downloaded_files
           
-          # Convert multiline input to space-separated and process
+          # Convert multiline input to space-separated
           LINKS=$(echo "${{ inputs.raw_links }}" | tr '\n' ' ')
           
           FILE_NUM=1
@@ -40,20 +40,21 @@ jobs:
             echo "$LINK"
             echo "=========================================="
             
-            # Extract filename from URL
-            FILENAME=$(basename "$LINK" | sed 's/\?.*//')
+            # Download with wget using the same flags as wget-downloader.yml
+            wget --content-disposition --trust-server-names "$LINK"
             
-            # Download with wget
-            wget --tries=3 --timeout=30 --progress=bar:force -O "$FILENAME" "$LINK"
+            # Find the downloaded file (wget might rename it)
+            DOWNLOADED_FILE=$(ls -1 | head -n 1)
+            echo "Downloaded file: $DOWNLOADED_FILE"
             
-            if [ -f "$FILENAME" ] && [ -s "$FILENAME" ]; then
-              SIZE=$(stat -c%s "$FILENAME")
+            if [ -f "$DOWNLOADED_FILE" ] && [ -s "$DOWNLOADED_FILE" ]; then
+              SIZE=$(stat -c%s "$DOWNLOADED_FILE")
               SIZE_MB=$((SIZE / 1024 / 1024))
-              echo "✅ Downloaded: $FILENAME (${SIZE_MB} MB)"
-              echo "$FILENAME:SUCCESS:$SIZE" >> ../download_status.txt
+              echo "✅ Downloaded: $DOWNLOADED_FILE (${SIZE_MB} MB)"
+              echo "$DOWNLOADED_FILE:SUCCESS:$SIZE" >> ../download_status.txt
             else
-              echo "❌ Failed to download: $FILENAME"
-              echo "$FILENAME:FAILED:0" >> ../download_status.txt
+              echo "❌ Failed to download from: $LINK"
+              echo "unknown:FAILED:0" >> ../download_status.txt
             fi
             
             FILE_NUM=$((FILE_NUM + 1))
