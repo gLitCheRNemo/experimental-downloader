@@ -1,4 +1,4 @@
-name: 4- Send To Bot
+name: 4- Send To Bale
 
 on:
   workflow_dispatch:
@@ -64,10 +64,8 @@ jobs:
           
           echo "BASE_NAME=$BASE_NAME" >> $GITHUB_ENV
 
-      - name: Resend missing parts using wget
+      - name: Download missing files (wget)
         run: |
-          TOKEN="${{ inputs.bale_token }}"
-          CHAT_ID="${{ inputs.bale_chat_id }}"
           BRANCH="${{ inputs.branch_name }}"
           REPO="${{ github.repository }}"
           PART_NUMBERS="${{ inputs.part_numbers }}"
@@ -75,22 +73,100 @@ jobs:
           
           if [ -z "$BASE_NAME" ]; then
             echo "ERROR: Could not detect base name from README.md"
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-              -d "chat_id=${CHAT_ID}" \
-              -d "text=❌ Could not detect base name from README.md in branch ${BRANCH}"
             exit 1
           fi
+          
+          # Create directory for downloads
+          mkdir -p downloaded_files
+          cd downloaded_files
+          
+          # Download each requested part
+          for PART_NUM in $PART_NUMBERS; do
+            echo "=========================================="
+            echo "Downloading part number: $PART_NUM"
+            echo "=========================================="
+            
+            if [ "$PART_NUM" = "final" ] || [ "$PART_NUM" = "0" ]; then
+              FILE_NAME="${BASE_NAME}.zip"
+            else
+              PART_NUM_PADDED=$(printf "%02d" $PART_NUM)
+              FILE_NAME="${BASE_NAME}.z${PART_NUM_PADDED}"
+            fi
+            
+            # Construct raw URL
+            RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/${FILE_NAME}"
+            echo "Raw URL: $RAW_URL"
+            
+            # Download with wget
+            echo "Downloading $FILE_NAME..."
+            wget --tries=3 --timeout=30 --progress=bar:force -O "$FILE_NAME" "$RAW_URL"
+            
+            if [ -f "$FILE_NAME" ] && [ -s "$FILE_NAME" ]; then
+              SIZE=$(stat -c%s "$FILE_NAME")
+              SIZE_MB=$((SIZE / 1024 / 1024))
+              echo "✅ Downloaded: $FILE_NAME (${SIZE_MB} MB)"
+              echo "$FILE_NAME:SUCCESS:$SIZE" >> ../download_status.txt
+            else
+              echo "❌ Failed to download $FILE_NAME"
+              echo "$FILE_NAME:FAILED:0" >> ../download_status.txt
+            fi
+            
+            echo ""
+          done
+          
+          cd ..
+          
+          # List downloaded files
+          echo "Files in downloaded_files directory:"
+          ls -lh downloaded_files/
+
+      - name: Verify downloads
+        run: |
+          if [ ! -f "download_status.txt" ]; then
+            echo "No downloads attempted"
+            exit 1
+          fi
+          
+          echo "Download verification:"
+          echo "=========================================="
+          cat download_status.txt
+          echo "=========================================="
+          
+          # Count successful downloads
+          SUCCESS_COUNT=$(grep -c ":SUCCESS:" download_status.txt || echo "0")
+          FAILED_COUNT=$(grep -c ":FAILED:" download_status.txt || echo "0")
+          
+          echo "Successful downloads: $SUCCESS_COUNT"
+          echo "Failed downloads: $FAILED_COUNT"
+          
+          if [ "$SUCCESS_COUNT" -eq 0 ]; then
+            echo "No files were downloaded successfully"
+            exit 1
+          fi
+          
+          echo "VERIFICATION_PASSED=true" >> $GITHUB_ENV
+
+      - name: Send files to Bale bot
+        run: |
+          TOKEN="${{ inputs.bale_token }}"
+          CHAT_ID="${{ inputs.bale_chat_id }}"
+          BRANCH="${{ inputs.branch_name }}"
+          PART_NUMBERS="${{ inputs.part_numbers }}"
+          BASE_NAME="${{ env.BASE_NAME }}"
           
           # Send header message
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            -d "text=📦 Resending missing parts from branch: ${BRANCH}%0A📁 Base name: ${BASE_NAME}%0A🔢 Part numbers: ${PART_NUMBERS}"
+            -d "text=📦 Sending missing parts from branch: ${BRANCH}%0A📁 Base name: ${BASE_NAME}%0A🔢 Part numbers: ${PART_NUMBERS}"
           
-          # Process each part number
+          cd downloaded_files
+          
+          # Process each file in order
+          PART_LIST=($PART_NUMBERS)
+          FILE_INDEX=0
+          
           for PART_NUM in $PART_NUMBERS; do
-            echo "=========================================="
-            echo "Processing part number: $PART_NUM"
-            echo "=========================================="
+            FILE_INDEX=$((FILE_INDEX + 1))
             
             if [ "$PART_NUM" = "final" ] || [ "$PART_NUM" = "0" ]; then
               FILE_NAME="${BASE_NAME}.zip"
@@ -101,29 +177,11 @@ jobs:
               CAPTION="📦 Missing Part ${PART_NUM}"
             fi
             
-            # Construct raw URL
-            RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/${FILE_NAME}"
-            echo "Raw URL: $RAW_URL"
-            
-            # Download with wget (like the reference workflow)
-            echo "Downloading $FILE_NAME using wget..."
-            wget --tries=3 --timeout=30 --progress=bar:force -O "$FILE_NAME" "$RAW_URL"
-            
-            if [ -f "$FILE_NAME" ]; then
+            if [ -f "$FILE_NAME" ] && [ -s "$FILE_NAME" ]; then
               SIZE=$(stat -c%s "$FILE_NAME")
               SIZE_MB=$((SIZE / 1024 / 1024))
               
-              if [ "$SIZE" -eq 0 ]; then
-                echo "❌ Downloaded file is 0 bytes!"
-                curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-                  -d "chat_id=${CHAT_ID}" \
-                  -d "text=❌ Part ${PART_NUM} downloaded but file is empty (0 bytes)"
-                rm -f "$FILE_NAME"
-                continue
-              fi
-              
-              echo "File size: $SIZE bytes (${SIZE_MB} MB)"
-              echo "Sending $FILE_NAME to Bale..."
+              echo "Sending file $FILE_INDEX: $FILE_NAME (${SIZE_MB} MB)"
               
               curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
                 -F "chat_id=${CHAT_ID}" \
@@ -131,20 +189,26 @@ jobs:
                 -F "caption=${CAPTION} | ${SIZE_MB} MB"
               
               echo "✅ Sent $FILE_NAME"
-              rm -f "$FILE_NAME"
+              
+              # Small delay between sends
+              sleep 1
             else
-              echo "❌ Failed to download $FILE_NAME"
+              echo "❌ File not found: $FILE_NAME"
               curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
                 -d "chat_id=${CHAT_ID}" \
-                -d "text=❌ Failed to download part ${PART_NUM} (${FILE_NAME})"
+                -d "text=❌ Could not send ${FILE_NAME} (file missing or empty)"
             fi
-            
-            sleep 1
           done
           
+          cd ..
+          
+          # Send completion message
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            -d "text=✅ Done resending requested parts."
+            -d "text=✅ Done sending requested parts from branch: ${BRANCH}"
 
       - name: Cleanup
-        run: rm -f README.md
+        run: |
+          rm -f README.md download_status.txt
+          rm -rf downloaded_files
+          echo "🧹 Cleaned up temporary files"
