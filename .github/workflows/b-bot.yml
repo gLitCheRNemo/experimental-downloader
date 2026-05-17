@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       youtube_url:
-        description: 'YouTube video URL'
+        description: YouTube video URL
         required: true
         type: string
       quality:
-        description: 'Video quality'
+        description: Video quality
         required: true
-        default: 'best'
+        default: best
         type: choice
         options:
           - best
@@ -21,20 +21,20 @@ on:
           - 480
           - audio
       parts_size:
-        description: 'Parts size (MB)'
+        description: Parts size in MB
         required: false
         type: string
         default: '45'
       bale_token:
-        description: 'Bale Bot Token'
+        description: Bale Bot Token
         required: true
         type: string
       bale_chat_id:
-        description: 'Bale Chat ID'
+        description: Bale Chat ID
         required: true
         type: string
       delay_seconds:
-        description: 'Delay between parts (seconds)'
+        description: Delay between parts in seconds
         required: false
         type: string
         default: '2'
@@ -50,12 +50,10 @@ jobs:
         with:
           persist-credentials: true
           fetch-depth: 0
-
       - name: Mask sensitive inputs
         run: |
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
-
       - name: Setup FFmpeg
         run: |
           wget https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
@@ -63,7 +61,6 @@ jobs:
           sudo mv ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/
           sudo mv ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/
           ffmpeg -version
-
       - name: Setup WARP
         run: |
           docker rm -f warp 2>/dev/null || true
@@ -78,9 +75,7 @@ jobs:
             --sysctl net.ipv4.conf.all.src_valid_mark=1 \
             -v warp-data:/var/lib/cloudflare-warp \
             caomingjun/warp
-          echo "Waiting for WARP to initialize..."
           sleep 15
-
       - name: Setup yt-dlp
         run: |
           sudo apt-get install -y python3-pip curl
@@ -90,7 +85,6 @@ jobs:
           export PATH="$DENO_INSTALL/bin:$PATH"
           echo "$DENO_INSTALL/bin" >> $GITHUB_PATH
           deno --version
-
       - name: Download video
         id: download
         run: |
@@ -110,8 +104,7 @@ jobs:
           echo "FILE=$FILE" >> $GITHUB_ENV
           echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
           docker stop warp || true
-
-      - name: Split video into parts
+      - name: Split video
         id: split
         run: |
           PARTS_SIZE="${{ inputs.parts_size }}"
@@ -123,12 +116,9 @@ jobs:
           FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
           SPLIT_SIZE_MB=$((PARTS_SIZE))
           if [ $FILE_SIZE_MB -le $SPLIT_SIZE_MB ]; then
-            echo "File is ${FILE_SIZE_MB}MB, smaller than split size (${SPLIT_SIZE_MB}MB). Copying directly."
             cp "$ORIGINAL_FILE" "../parts/${SAFE_NAME}.mp4"
-            echo "TOTAL_PARTS=1" >> $GITHUB_ENV
             echo "SINGLE_FILE=true" >> $GITHUB_ENV
           else
-            echo "File is ${FILE_SIZE_MB}MB, splitting into ${SPLIT_SIZE_MB}MB parts..."
             zip -0 -s ${PARTS_SIZE}m "../parts/${SAFE_NAME}.zip" "$ORIGINAL_FILE"
             echo "SINGLE_FILE=false" >> $GITHUB_ENV
             cd ../parts
@@ -136,15 +126,8 @@ jobs:
             echo "TOTAL_PARTS=$TOTAL_PARTS" >> $GITHUB_ENV
           fi
           cd ../parts
-          cat > README.txt << 'EOF'
-HOW TO EXTRACT:
-1. Download ALL files to the same folder
-2. If you have a .zip file, extract it with ZArchiver/7-Zip
-3. If you have a single .mp4 file, just play it directly
-EOF
-          ls -lh
-
-      - name: Send parts to Bale
+          echo "HOW TO EXTRACT: Download all files. If you have a .zip file, extract it with ZArchiver." > README.txt
+      - name: Send to Bale
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
@@ -155,56 +138,28 @@ EOF
           cd parts
           SAFE_NAME="${{ env.SAFE_NAME }}"
           if [ -f "README.txt" ]; then
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
-              -F "chat_id=${CHAT_ID}" \
-              -F "document=@README.txt" \
-              -F "caption=HOW TO EXTRACT: Read this file"
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" -F "chat_id=${CHAT_ID}" -F "document=@README.txt"
             sleep $DELAY
           fi
           if [ "${{ env.SINGLE_FILE }}" = "true" ]; then
             if [ -f "${SAFE_NAME}.mp4" ]; then
               SIZE=$(stat -c%s "${SAFE_NAME}.mp4")
               SIZE_MB=$((SIZE / 1024 / 1024))
-              echo "Sending single file ${SAFE_NAME}.mp4 (${SIZE_MB}MB)"
-              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
-                -F "chat_id=${CHAT_ID}" \
-                -F "document=@${SAFE_NAME}.mp4" \
-                -F "caption=Video: ${SAFE_NAME} | ${SIZE_MB}MB"
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" -F "chat_id=${CHAT_ID}" -F "document=@${SAFE_NAME}.mp4" -F "caption=${SAFE_NAME} ${SIZE_MB}MB"
             fi
           else
-            PART_NUM=1
-            FAILED=""
             for part in $(ls ${SAFE_NAME}.z* 2>/dev/null | sort -V); do
               SIZE=$(stat -c%s "$part")
               SIZE_MB=$((SIZE / 1024 / 1024))
-              echo "Sending $part (${SIZE_MB}MB) - Part $PART_NUM/${{ env.TOTAL_PARTS }}"
-              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
-                -F "chat_id=${CHAT_ID}" \
-                -F "document=@${part}" \
-                -F "caption=Part $PART_NUM/${{ env.TOTAL_PARTS }} | ${SIZE_MB}MB"
-              if [ $? -ne 0 ]; then
-                FAILED="$FAILED $PART_NUM"
-              fi
-              PART_NUM=$((PART_NUM + 1))
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" -F "chat_id=${CHAT_ID}" -F "document=@${part}" -F "caption=${part} ${SIZE_MB}MB"
               sleep $DELAY
             done
             if [ -f "${SAFE_NAME}.zip" ]; then
               SIZE=$(stat -c%s "${SAFE_NAME}.zip")
               SIZE_MB=$((SIZE / 1024 / 1024))
-              echo "Sending final .zip file (${SIZE_MB}MB)"
-              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
-                -F "chat_id=${CHAT_ID}" \
-                -F "document=@${SAFE_NAME}.zip" \
-                -F "caption=FINAL - Extract this file | ${SIZE_MB}MB"
-            fi
-            if [ -n "$FAILED" ]; then
-              echo "Partial failure. Failed parts:$FAILED"
-              exit 1
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" -F "chat_id=${CHAT_ID}" -F "document=@${SAFE_NAME}.zip" -F "caption=FINAL ${SAFE_NAME}.zip ${SIZE_MB}MB"
             fi
           fi
-          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-            -d "chat_id=${CHAT_ID}" \
-            -d "text=Done! Delay: ${DELAY}s"
-
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" -d "chat_id=${CHAT_ID}" -d "text=Done"
       - name: Cleanup
         run: rm -rf tmpvideos parts
