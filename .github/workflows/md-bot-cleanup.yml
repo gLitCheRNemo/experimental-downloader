@@ -2,6 +2,11 @@ name: 3- MD Bot - Cleanup
 
 on:
   workflow_dispatch:
+    inputs:
+      branch_name:
+        description: Branch name to delete (e.g., md-parts-20260517-143000)
+        required: true
+        type: string
 
 jobs:
   cleanup:
@@ -14,14 +19,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Delete md-parts branch
+      - name: Delete branch
         run: |
-          BRANCH_NAME="md-parts"
-          echo "Deleting branch: $BRANCH_NAME"
+          BRANCH="${{ inputs.branch_name }}"
+          echo "Deleting branch: $BRANCH"
           
-          if git ls-remote --exit-code --heads origin "$BRANCH_NAME"; then
-            git push origin --delete "$BRANCH_NAME"
-            echo "✅ Branch $BRANCH_NAME deleted. Storage freed."
+          if git ls-remote --exit-code --heads origin "$BRANCH"; then
+            git push origin --delete "$BRANCH"
+            echo "✅ Branch $BRANCH deleted. Storage freed."
           else
-            echo "⚠️ Branch $BRANCH_NAME does not exist or was already deleted."
+            echo "⚠️ Branch $BRANCH does not exist or was already deleted."
           fi
