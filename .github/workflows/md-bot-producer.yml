@@ -94,28 +94,28 @@ jobs:
           
           # Create README.md with file list
           cat > README.md << EOF
-          # File Manifest
+# File Manifest
 
-          This branch contains split parts of: **${{ env.SAFE_NAME }}**
+This branch contains split parts of: **${{ env.SAFE_NAME }}**
 
-          ## Files in this branch:
+## Files in this branch:
 
-          $(ls -1 | grep -v README.md | sed 's/^/- /')
+$(ls -1 | grep -v README.md | sed 's/^/- /')
 
-          ## How to use:
+## How to use:
 
-          1. Download all .z01, .z02, ... files AND the .zip file
-          2. Place them in the same folder
-          3. Extract the .zip file with ZArchiver (Android) or 7-Zip (Windows)
+1. Download all .z01, .z02, ... files AND the .zip file
+2. Place them in the same folder
+3. Extract the .zip file with ZArchiver (Android) or 7-Zip (Windows)
 
-          ## Missing a part?
+## Missing a part?
 
-          Run the **MD Bot - Resender** workflow and enter the part number.
-          EOF
+Run the **MD Bot - Resender** workflow and enter the part number.
+EOF
           
           cd ..
 
-      - name: Prepare md-parts branch
+      - name: Create and populate md-parts branch
         run: |
           BRANCH_NAME="md-parts"
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
@@ -130,19 +130,27 @@ jobs:
           git checkout --orphan $BRANCH_NAME
           git rm -rf . || true
           
-          # Copy all files to branch root
+          # Copy all split parts and README to branch root
           cp -r split_parts/* . 2>/dev/null || true
+          
+          # Verify files exist
+          echo "Files in branch before commit:"
+          ls -la
           
           # Add all files
           git add .
           
-          # Commit all files in one go (simpler, more reliable)
+          # Commit all files
           git commit -m "[bot] Add all files for ${{ env.SAFE_NAME }}"
           
           # Push the branch
           git push origin $BRANCH_NAME
           
           echo "✅ Branch $BRANCH_NAME created with all files"
+          
+          # Verify branch was pushed successfully
+          echo "Verifying branch contents..."
+          git ls-tree $BRANCH_NAME --name-only
 
       - name: Send parts to Bale one by one
         run: |
