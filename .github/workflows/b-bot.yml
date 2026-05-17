@@ -1,16 +1,16 @@
-name: B Bot
+name: B Bot OG
 
 on:
   workflow_dispatch:
     inputs:
       youtube_url:
-        description: YouTube video URL
+        description: '🔗 YouTube video URL(s)'
         required: true
         type: string
       quality:
-        description: Video quality
+        description: '🎬 Video quality'
         required: true
-        default: best
+        default: 'best'
         type: choice
         options:
           - best
@@ -21,20 +21,20 @@ on:
           - 480
           - audio
       parts_size:
-        description: Parts size in MB
+        description: '🫙 Parts size (MB)'
         required: false
         type: string
         default: '45'
       bale_token:
-        description: Bale Bot Token
+        description: '🤖 Bale Bot Token (from BotFather)'
         required: true
         type: string
       bale_chat_id:
-        description: Bale Chat ID
+        description: '💬 Bale Chat ID'
         required: true
         type: string
       delay_seconds:
-        description: Delay between parts
+        description: '⏱️ Delay between sending parts (seconds)'
         required: false
         type: string
         default: '2'
@@ -44,6 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -68,6 +69,7 @@ jobs:
         run: |
           docker rm -f warp 2>/dev/null || true
           docker network create warp-net 2>/dev/null || true
+
           docker run -d \
             --name warp \
             --restart=always \
@@ -78,22 +80,45 @@ jobs:
             --sysctl net.ipv4.conf.all.src_valid_mark=1 \
             -v warp-data:/var/lib/cloudflare-warp \
             caomingjun/warp
-          sleep 15
+
+          echo "Waiting for WARP to initialize..."
+
+          WARP_READY=false
+          for i in {1..10}; do
+            RESULT=$(curl -s --max-time 3 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+            
+            if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
+              echo "WARP proxy is ready! (Took $i attempts)"
+              echo "$RESULT" | grep -E "^(ip|warp|colo)="
+              WARP_READY=true
+              break
+            fi
+            
+            echo "Attempt $i/10 - WARP not ready, waiting 3s..."
+            sleep 3
+          done
+
+          if [ "$WARP_READY" = false ]; then
+            echo "WARP failed to activate fully, continuing anyway..."
+            echo "Last response: $RESULT"
+          fi
 
       - name: Setup yt-dlp
         run: |
           sudo apt-get install -y python3-pip curl
           pip install yt-dlp --pre
+
           curl -fsSL https://deno.land/install.sh | sh
           export DENO_INSTALL="$HOME/.deno"
           export PATH="$DENO_INSTALL/bin:$PATH"
           echo "$DENO_INSTALL/bin" >> $GITHUB_PATH
           deno --version
-
+          
       - name: Download video
         id: download
         run: |
           QUALITY="${{ inputs.quality }}"
+          
           if [ "$QUALITY" = "audio" ]; then
             FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
           elif [ "$QUALITY" = "best" ]; then
@@ -101,81 +126,167 @@ jobs:
           else
             FORMAT_OPTS="-f bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}] --merge-output-format mp4"
           fi
+          
           mkdir -p tmpvideos
           cd tmpvideos
           yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" $FORMAT_OPTS "${{ inputs.youtube_url }}"
+
           FILE=$(ls -1 | head -n 1)
-          SAFE_NAME=$(echo "$FILE" | sed 's/ /_/g')
+          SAFE_NAME=$(echo "$FILE" | sed 's/^[[:space:]]*//' | tr ' ' '_')
           echo "FILE=$FILE" >> $GITHUB_ENV
           echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
+          
           docker stop warp || true
 
-      - name: Split video into ZIP parts
+      - name: Split video into parts (Video Downloader V2 ZIP method)
         id: split
         run: |
           PARTS_SIZE="${{ inputs.parts_size }}"
           ORIGINAL_FILE="${{ env.FILE }}"
           SAFE_NAME="${{ env.SAFE_NAME }}"
+          
+          echo "Splitting $ORIGINAL_FILE into ${PARTS_SIZE}MB parts using ZIP method..."
+          
           mkdir -p parts
           cd tmpvideos
+          
+          # Video Downloader V2 method: zip -0 -s (no compression, split)
           zip -0 -s ${PARTS_SIZE}m "../parts/${SAFE_NAME}.zip" "$ORIGINAL_FILE"
+          
           cd ..
           cd parts
+          
+          # Count the parts created
           TOTAL_PARTS=$(ls -1 ${SAFE_NAME}.z* ${SAFE_NAME}.zip 2>/dev/null | wc -l)
           echo "TOTAL_PARTS=$TOTAL_PARTS" >> $GITHUB_ENV
-          echo "HOW TO EXTRACT: Download ALL parts, then open the .zip file with ZArchiver" > README.txt
+          echo "Total parts created: $TOTAL_PARTS"
+          
+          # Create README with extraction instructions
+          cat > README.txt << 'EOF'
+HOW TO EXTRACT:
+1. Download ALL parts (.z01, .z02, ..., .zip) to the same folder
+2. Extract the .zip file using 7-Zip, WinRAR, or ZArchiver on Android
+3. The video will be restored automatically
+EOF
+          
+          ls -lh ${SAFE_NAME}.z* ${SAFE_NAME}.zip 2>/dev/null
 
-      - name: Send parts to Bale
+      - name: Send parts one by one to Bale as Documents
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
           DELAY="${{ inputs.delay_seconds }}"
-          [[ ! "$DELAY" =~ ^[0-9]+$ ]] && DELAY=2
+          
+          # Validate delay is a number
+          if ! [[ "$DELAY" =~ ^[0-9]+$ ]]; then
+            echo "Invalid delay value. Using default 2 seconds."
+            DELAY=2
+          fi
+          
           cd parts
           SAFE_NAME="${{ env.SAFE_NAME }}"
+          
+          PARTS_LIST=$(ls -1 ${SAFE_NAME}.z* 2>/dev/null | sort -V)
+          TOTAL_PARTS=$(echo "$PARTS_LIST" | wc -l)
+          
+          echo "Found $TOTAL_PARTS parts to send"
+          echo "Delay between parts: $DELAY seconds"
+          PART_NUM=1
+          FAILED_PARTS=""
+          
+          # Send README.txt first
           if [ -f "README.txt" ]; then
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "📄 Sending README.txt with reassembly instructions..."
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            
             curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
               -F "chat_id=${CHAT_ID}" \
               -F "document=@README.txt" \
-              -F "caption=Extract the .zip file with ZArchiver"
+              -F "caption=📋 EXTRACT: Download ALL parts, then extract the .zip file with ZArchiver/7-Zip"
+            
+            echo "✅ README.txt sent"
             sleep $DELAY
           fi
-          PART_NUM=1
-          FAILED=""
-          for part in $(ls ${SAFE_NAME}.z* 2>/dev/null | sort -V); do
-            SIZE=$(stat -c%s "$part")
-            SIZE_MB=$((SIZE / 1024 / 1024))
-            echo "Sending $part ($SIZE_MB MB) - Part $PART_NUM/${{ env.TOTAL_PARTS }}"
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+          
+          # Send all .z* parts
+          for part in $PARTS_LIST; do
+            FILE_SIZE=$(stat -c%s "$part")
+            FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
+            
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "📤 Sending part $PART_NUM of $TOTAL_PARTS: $part (${FILE_SIZE_MB} MB)"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
               -F "chat_id=${CHAT_ID}" \
               -F "document=@${part}" \
-              -F "caption=Part $PART_NUM/${{ env.TOTAL_PARTS }} | $SIZE_MB MB"
-            if [ $? -ne 0 ]; then
-              FAILED="$FAILED $PART_NUM"
+              -F "caption=🎬 Video: ${{ env.SAFE_NAME }}%0A📦 Part: ${PART_NUM}/${TOTAL_PARTS}%0A🎚️ Quality: ${{ inputs.quality }}%0A📁 Size: ${FILE_SIZE_MB} MB%0A🔗 Source: ${{ inputs.youtube_url }}%0A%0A📋 You need ALL parts + the .zip file to extract!")
+            
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            BODY=$(echo "$RESPONSE" | sed '$d')
+            
+            if [ "$HTTP_CODE" -eq 200 ]; then
+              echo "✅ Part $PART_NUM sent successfully!"
+            else
+              echo "❌ Failed to send part $PART_NUM (HTTP $HTTP_CODE)"
+              echo "Response: $BODY"
+              FAILED_PARTS="$FAILED_PARTS $PART_NUM"
             fi
+            
             PART_NUM=$((PART_NUM + 1))
-            if [ $PART_NUM -le ${{ env.TOTAL_PARTS }} ]; then
+            
+            if [ $PART_NUM -le $TOTAL_PARTS ]; then
+              echo "⏳ Waiting $DELAY seconds before next part..."
               sleep $DELAY
             fi
           done
+          
+          # Send the final .zip file
           if [ -f "${SAFE_NAME}.zip" ]; then
-            SIZE=$(stat -c%s "${SAFE_NAME}.zip")
-            SIZE_MB=$((SIZE / 1024 / 1024))
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+            FILE_SIZE=$(stat -c%s "${SAFE_NAME}.zip")
+            FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
+            
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "📤 Sending FINAL .zip file: ${SAFE_NAME}.zip (${FILE_SIZE_MB} MB)"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
               -F "chat_id=${CHAT_ID}" \
               -F "document=@${SAFE_NAME}.zip" \
-              -F "caption=FINAL - Extract this file | $SIZE_MB MB"
+              -F "caption=✅ FINAL PART - EXTRACT THIS FILE!%0A%0AVideo: ${{ env.SAFE_NAME }}%0A🎚️ Quality: ${{ inputs.quality }}%0A📁 Size: ${FILE_SIZE_MB} MB%0A🔗 Source: ${{ inputs.youtube_url }}%0A%0A📋 TO EXTRACT:%0A1. Download ALL parts (.z01, .z02, ...) AND this .zip file%0A2. Extract this .zip file with ZArchiver/7-Zip%0A3. The video will be restored automatically!")
+            
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            
+            if [ "$HTTP_CODE" -eq 200 ]; then
+              echo "✅ Final .zip sent successfully!"
+            else
+              echo "❌ Failed to send final .zip (HTTP $HTTP_CODE)"
+              FAILED_PARTS="$FAILED_PARTS FINAL"
+            fi
           fi
-          if [ -z "$FAILED" ]; then
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-              -d "chat_id=${CHAT_ID}" \
-              -d "text=Done! ${{ env.TOTAL_PARTS }} parts sent. Delay: ${DELAY}s"
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # Send completion message
+          if [ -z "$FAILED_PARTS" ]; then
+            MESSAGE="✅ DOWNLOAD COMPLETE!%0A%0A📹 Video: ${{ env.SAFE_NAME }}%0A📦 Total parts: ${TOTAL_PARTS} + final .zip%0A🎬 Quality: ${{ inputs.quality }}%0A🔗 Source: ${{ inputs.youtube_url }}%0A%0A✨ All parts sent successfully! (Delay: ${DELAY}s)%0A%0A📋 TO EXTRACT:%0A1. Download ALL parts (.z01, .z02, ...) AND the .zip file%0A2. Extract the .zip file with ZArchiver (Android) or 7-Zip (Windows)%0A3. The video will be restored automatically!"
+            echo "✅ All parts sent successfully!"
           else
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-              -d "chat_id=${CHAT_ID}" \
-              -d "text=Partial failure. Failed parts:$FAILED"
+            MESSAGE="⚠️ DOWNLOAD PARTIALLY COMPLETE%0A%0A📹 Video: ${{ env.SAFE_NAME }}%0A📦 Parts sent: ${TOTAL_PARTS}%0A❌ Failed parts:${FAILED_PARTS}%0A🎬 Quality: ${{ inputs.quality }}%0A🔗 Source: ${{ inputs.youtube_url }}%0A%0A⚠️ Some parts failed. Please re-run the workflow."
+            echo "⚠️ Some parts failed: $FAILED_PARTS"
+          fi
+          
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=${MESSAGE}"
+          
+          if [ -n "$FAILED_PARTS" ]; then
             exit 1
           fi
 
       - name: Cleanup
-        run: rm -rf tmpvideos parts
+        run: |
+          rm -rf tmpvideos parts
+          echo "🧹 Cleaned up temporary files"
