@@ -31,22 +31,31 @@ jobs:
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
 
-      - name: Fetch file list from branch
+      - name: Fetch README.md from branch root
         run: |
           BRANCH="${{ inputs.branch_name }}"
           REPO="${{ github.repository }}"
           
-          # Clone just the branch to see all files
-          git clone --depth 1 --branch $BRANCH "https://github.com/${REPO}.git" branch_files
-          cd branch_files
-          echo "Files in branch:"
-          ls -la
+          # Download README.md directly from the branch root
+          RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/README.md"
+          echo "Downloading README from: $RAW_URL"
           
-          # Create a list of all files for reference
-          ls -1 > ../file_list.txt
-          cd ..
+          curl -L -o README.md "$RAW_URL"
+          
+          if [ ! -f "README.md" ]; then
+            echo "ERROR: Could not download README.md from branch $BRANCH"
+            echo "Make sure the branch exists and has a README.md file at its root"
+            exit 1
+          fi
+          
+          echo "README.md downloaded successfully"
+          echo ""
+          echo "README.md contents:"
+          echo "=========================================="
+          cat README.md
+          echo "=========================================="
 
-      - name: Resend missing parts by filename pattern
+      - name: Extract and send files by part number
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
@@ -54,12 +63,12 @@ jobs:
           REPO="${{ github.repository }}"
           PART_NUMBERS="${{ inputs.part_numbers }}"
           
-          # Find the base name from existing files
-          BASE_NAME=$(cat file_list.txt | grep -v README.md | grep '\.z[0-9][0-9]$' | head -1 | sed 's/\.z[0-9][0-9]$//')
+          # Find the base name from README.md (first .z file listed)
+          BASE_NAME=$(grep -o '[a-zA-Z0-9_\-]*\.z[0-9][0-9]' README.md | head -1 | sed 's/\.z[0-9][0-9]$//')
           
           if [ -z "$BASE_NAME" ]; then
-            # Try to find base name from .zip file
-            BASE_NAME=$(cat file_list.txt | grep '\.zip$' | head -1 | sed 's/\.zip$//')
+            # Try to find base name from .zip file in README
+            BASE_NAME=$(grep -o '[a-zA-Z0-9_\-]*\.zip' README.md | head -1 | sed 's/\.zip$//')
           fi
           
           echo "Base name detected: $BASE_NAME"
@@ -78,46 +87,55 @@ jobs:
             if [ "$PART_NUM" = "final" ] || [ "$PART_NUM" = "0" ]; then
               FILE_NAME="${BASE_NAME}.zip"
               CAPTION="📦 FINAL PART (Extract this file)"
+              # Verify file exists in README
+              if ! grep -q "$FILE_NAME" README.md; then
+                echo "❌ $FILE_NAME not found in README.md"
+                curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+                  -d "chat_id=${CHAT_ID}" \
+                  -d "text=❌ Final .zip file not found in branch"
+                continue
+              fi
             else
               # Format with leading zero (1 -> 01, 15 -> 15)
               PART_NUM_PADDED=$(printf "%02d" $PART_NUM)
               FILE_NAME="${BASE_NAME}.z${PART_NUM_PADDED}"
               CAPTION="📦 Missing Part ${PART_NUM}"
-            fi
-            
-            # Check if file exists in the branch
-            if grep -q "$FILE_NAME" file_list.txt; then
-              echo "Found: $FILE_NAME"
               
-              # Construct raw URL
-              RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/${FILE_NAME}"
-              echo "Downloading from: $RAW_URL"
-              
-              curl -L -o "$FILE_NAME" "$RAW_URL"
-              
-              if [ -f "$FILE_NAME" ]; then
-                SIZE=$(stat -c%s "$FILE_NAME")
-                SIZE_MB=$((SIZE / 1024 / 1024))
-                
-                echo "Sending $FILE_NAME to Bale..."
-                curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
-                  -F "chat_id=${CHAT_ID}" \
-                  -F "document=@${FILE_NAME}" \
-                  -F "caption=${CAPTION} | ${SIZE_MB} MB"
-                
-                echo "✅ Sent $FILE_NAME"
-                rm -f "$FILE_NAME"
-              else
-                echo "❌ Failed to download $FILE_NAME"
+              # Verify file exists in README
+              if ! grep -q "$FILE_NAME" README.md; then
+                echo "❌ $FILE_NAME not found in README.md"
                 curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
                   -d "chat_id=${CHAT_ID}" \
-                  -d "text=❌ Failed to download part ${PART_NUM}"
+                  -d "text=❌ Part ${PART_NUM} (${FILE_NAME}) not found in branch"
+                continue
               fi
+            fi
+            
+            echo "Found in README: $FILE_NAME"
+            
+            # Construct raw URL
+            RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/${FILE_NAME}"
+            echo "Downloading from: $RAW_URL"
+            
+            curl -L -o "$FILE_NAME" "$RAW_URL"
+            
+            if [ -f "$FILE_NAME" ]; then
+              SIZE=$(stat -c%s "$FILE_NAME")
+              SIZE_MB=$((SIZE / 1024 / 1024))
+              
+              echo "Sending $FILE_NAME to Bale..."
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+                -F "chat_id=${CHAT_ID}" \
+                -F "document=@${FILE_NAME}" \
+                -F "caption=${CAPTION} | ${SIZE_MB} MB"
+              
+              echo "✅ Sent $FILE_NAME"
+              rm -f "$FILE_NAME"
             else
-              echo "❌ File not found in branch: $FILE_NAME"
+              echo "❌ Failed to download $FILE_NAME"
               curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
                 -d "chat_id=${CHAT_ID}" \
-                -d "text=❌ Part ${PART_NUM} (${FILE_NAME}) not found in branch"
+                -d "text=❌ Failed to download part ${PART_NUM}"
             fi
             
             # Small delay between files
@@ -129,4 +147,4 @@ jobs:
             -d "text=✅ Done resending requested parts."
 
       - name: Cleanup
-        run: rm -rf branch_files file_list.txt
+        run: rm -f README.md
