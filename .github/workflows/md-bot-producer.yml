@@ -42,6 +42,23 @@ jobs:
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
 
+      - name: Prepare md-parts branch
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git fetch origin
+
+          if git ls-remote --exit-code --heads origin md-parts; then
+            git checkout md-parts
+            git pull origin md-parts
+          else
+            git checkout --orphan md-parts
+            git rm -rf . || true
+            mkdir -p md-parts
+            git commit --allow-empty -m "[bot] Initialize md-parts branch"
+            git push --set-upstream origin md-parts
+          fi
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -52,9 +69,22 @@ jobs:
         id: download
         run: |
           MAGNET="${{ inputs.magnet_link }}"
-          mkdir -p downloads
-          cd downloads
-          aria2c --seed-time=0 --max-connection-per-server=16 --split=16 --console-log-level=error "$MAGNET"
+          mkdir -p tmpmagnet
+          cd tmpmagnet
+          
+          aria2c \
+            --enable-dht=true \
+            --bt-enable-lpd=true \
+            --bt-max-peers=0 \
+            --seed-time=0 \
+            --follow-torrent=true \
+            --check-integrity=true \
+            --dir=. \
+            "$MAGNET"
+          
+          echo "Download completed"
+          
+          # Find the downloaded file/directory
           FILE=$(ls -1 | head -n 1)
           SAFE_NAME=$(echo "$FILE" | sed 's/ /_/g' | sed 's/[^a-zA-Z0-9._-]/_/g')
           echo "FILE=$FILE" >> $GITHUB_ENV
@@ -66,91 +96,126 @@ jobs:
         run: |
           PARTS_SIZE="${{ inputs.parts_size }}"
           SAFE_NAME="${{ env.SAFE_NAME }}"
-          FILE_PATH="downloads/${{ env.FILE }}"
-          FILE_SIZE=$(stat -c%s "$FILE_PATH")
-          FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
+          FILE_PATH="tmpmagnet/${{ env.FILE }}"
           
-          mkdir -p split_parts
+          mkdir -p md-parts
           
-          if [ $FILE_SIZE_MB -le $PARTS_SIZE ]; then
-            echo "File is smaller than split size. Creating single ZIP."
-            zip -0 "split_parts/${SAFE_NAME}.zip" "$FILE_PATH"
-            echo "SINGLE_FILE=true" >> $GITHUB_ENV
+          # Check if it's a file or directory
+          if [ -d "$FILE_PATH" ]; then
+            echo "Zipping directory contents"
+            cd tmpmagnet
+            zip -0 -r -s ${PARTS_SIZE}m "../md-parts/${SAFE_NAME}.zip" "${{ env.FILE }}"
+            cd ..
           else
-            echo "File is larger than split size. Creating split ZIP."
-            cd downloads
-            zip -0 -r -s ${PARTS_SIZE}m "../split_parts/${SAFE_NAME}.zip" "${{ env.FILE }}"
-            cd ..
-            cd split_parts
-            TOTAL_PARTS=$(ls -1 ${SAFE_NAME}.z* 2>/dev/null | wc -l)
-            echo "TOTAL_PARTS=$TOTAL_PARTS" >> $GITHUB_ENV
-            echo "SINGLE_FILE=false" >> $GITHUB_ENV
-            cd ..
+            FILE_SIZE=$(stat -c%s "$FILE_PATH")
+            FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
+            
+            if [ $FILE_SIZE_MB -le $PARTS_SIZE ]; then
+              echo "File is smaller than split size. Creating single ZIP."
+              zip -0 "md-parts/${SAFE_NAME}.zip" "$FILE_PATH"
+              echo "SINGLE_FILE=true" >> $GITHUB_ENV
+            else
+              echo "File is larger than split size. Creating split ZIP."
+              cd tmpmagnet
+              zip -0 -r -s ${PARTS_SIZE}m "../md-parts/${SAFE_NAME}.zip" "${{ env.FILE }}"
+              cd ..
+              cd md-parts
+              TOTAL_PARTS=$(ls -1 ${SAFE_NAME}.z* 2>/dev/null | wc -l)
+              echo "TOTAL_PARTS=$TOTAL_PARTS" >> $GITHUB_ENV
+              echo "SINGLE_FILE=false" >> $GITHUB_ENV
+              cd ..
+            fi
           fi
 
-      - name: Create README with file manifest
+      - name: Generate README with Download Links
         run: |
-          cd split_parts
+          cd md-parts
+          rm -f README.md
           
-          # Create README.md with file list
-          cat > README.md << EOF
-          # File Manifest
-
-          This branch contains split parts of: **${{ env.SAFE_NAME }}**
-
-          ## Files in this branch:
-
-          $(ls -1 | grep -v README.md | sed 's/^/- /')
-
-          ## How to use:
-
-          1. Download all .z01, .z02, ... files AND the .zip file
-          2. Place them in the same folder
-          3. Extract the .zip file with ZArchiver (Android) or 7-Zip (Windows)
-
-          ## Missing a part?
-
-          Run the **MD Bot - Resender** workflow and enter the part number.
-          EOF
+          echo "# 📥 Download Links" > README.md
+          echo "Generated on: $(date)" >> README.md
+          echo "" >> README.md
+          echo "## Files in this branch:" >> README.md
+          echo "" >> README.md
+          
+          for file in *; do
+            if [ -f "$file" ] && [ "$file" != "README.md" ]; then
+              filename=$(basename "$file")
+              encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
+              url="https://github.com/${{ github.repository }}/raw/md-parts/$encoded_filename"
+              echo "- [Download $filename]($url)" >> README.md
+            fi
+          done
+          
+          echo "" >> README.md
+          echo "## Missing a part?" >> README.md
+          echo "" >> README.md
+          echo "Run the **MD Bot - Resender** workflow and enter the part number." >> README.md
           
           cd ..
 
-      - name: Create and populate md-parts branch
+      - name: Commit and Push in Batches of 5
         run: |
-          BRANCH_NAME="md-parts"
-          echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git fetch origin
+          # Ensure we are on the md-parts branch
+          git checkout md-parts
           
-          # Delete old branch if exists
-          git push origin --delete $BRANCH_NAME 2>/dev/null || true
+          # Check if md-parts directory exists and has files
+          if [ ! -d "md-parts" ] || [ -z "$(ls -A md-parts 2>/dev/null)" ]; then
+            echo "No files found in md-parts directory. Skipping commit."
+            exit 0
+          fi
           
-          # Create fresh orphan branch
-          git checkout --orphan $BRANCH_NAME
-          git rm -rf . || true
+          # Store list of files
+          ls md-parts/* 2>/dev/null > file_list.txt || true
           
-          # Copy all split parts and README to branch root
-          cp -r split_parts/* . 2>/dev/null || true
+          TOTAL_FILES=$(cat file_list.txt | wc -l)
+          echo "Total files to commit: $TOTAL_FILES"
           
-          # Verify files exist
-          echo "Files in branch before commit:"
-          ls -la
+          if [ "$TOTAL_FILES" -eq 0 ]; then
+            echo "No new files to commit"
+            rm -f file_list.txt
+            exit 0
+          fi
           
-          # Add all files
-          git add .
+          BATCH_SIZE=5
+          BATCH_NUM=1
           
-          # Commit all files
-          git commit -m "[bot] Add all files for ${{ env.SAFE_NAME }}"
+          while [ $(cat file_list.txt | wc -l) -gt 0 ]; do
+            BATCH_FILES=$(head -n $BATCH_SIZE file_list.txt)
+            
+            tail -n +$((BATCH_SIZE + 1)) file_list.txt > temp_list.txt 2>/dev/null || touch temp_list.txt
+            mv temp_list.txt file_list.txt
+            
+            echo "📦 Processing batch $BATCH_NUM with $(echo $BATCH_FILES | wc -w) files..."
+            
+            for file in $BATCH_FILES; do
+              if [ -f "$file" ]; then
+                git add "$file"
+                echo "  Added: $(basename "$file")"
+              fi
+            done
+            
+            if [ $BATCH_NUM -eq 1 ] && [ -f "md-parts/README.md" ]; then
+              git add md-parts/README.md
+              echo "  Added: README.md"
+            fi
+            
+            # Only commit if there are changes
+            if ! git diff --cached --quiet; then
+              git commit -m "[bot] Add files batch $BATCH_NUM ($(echo $BATCH_FILES | wc -w) files)"
+              git push origin md-parts
+              echo "✅ Batch $BATCH_NUM committed and pushed successfully"
+            else
+              echo "⚠️ No changes to commit in batch $BATCH_NUM"
+            fi
+            
+            BATCH_NUM=$((BATCH_NUM + 1))
+            
+            sleep 2
+          done
           
-          # Push the branch
-          git push origin $BRANCH_NAME
-          
-          echo "✅ Branch $BRANCH_NAME created with all files"
-          
-          # Verify branch was pushed successfully
-          echo "Verifying branch contents..."
-          git ls-tree $BRANCH_NAME --name-only
+          echo "✅ All $TOTAL_FILES files committed and pushed successfully to md-parts branch in $((BATCH_NUM - 1)) batches"
+          rm -f file_list.txt temp_list.txt
 
       - name: Send parts to Bale one by one
         run: |
@@ -158,8 +223,8 @@ jobs:
           CHAT_ID="${{ inputs.bale_chat_id }}"
           DELAY="${{ inputs.delay_seconds }}"
           SAFE_NAME="${{ env.SAFE_NAME }}"
-          BRANCH_NAME="${{ env.BRANCH_NAME }}"
           REPO="${{ github.repository }}"
+          BRANCH_NAME="md-parts"
           
           if ! [[ "$DELAY" =~ ^[0-9]+$ ]]; then
             DELAY=2
@@ -228,4 +293,4 @@ jobs:
             -d "text=✅ Done! Branch: ${BRANCH_NAME} | Total parts: ${{ env.TOTAL_PARTS }} | Delay: ${DELAY}s%0A%0A⚠️ Run Cleanup when done to delete the branch."
 
       - name: Cleanup local files
-        run: rm -rf downloads split_parts
+        run: rm -rf tmpmagnet md-parts
