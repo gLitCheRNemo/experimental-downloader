@@ -49,16 +49,11 @@ jobs:
           MAGNET="${{ inputs.magnet_link }}"
           mkdir -p downloads
           cd downloads
-          
-          # Use aria2 to download magnet link
           aria2c --seed-time=0 --max-connection-per-server=16 --split=16 --console-log-level=error "$MAGNET"
-          
-          # Find the downloaded file
           FILE=$(ls -1 | head -n 1)
           SAFE_NAME=$(echo "$FILE" | sed 's/ /_/g' | sed 's/[^a-zA-Z0-9._-]/_/g')
           echo "FILE=$FILE" >> $GITHUB_ENV
           echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
-          
           cd ..
 
       - name: Split file into parts
@@ -73,11 +68,9 @@ jobs:
           mkdir -p tmpzip
           
           if [ $FILE_SIZE_MB -le $PARTS_SIZE ]; then
-            echo "File is smaller than split size. Creating single ZIP."
             zip -0 "tmpzip/${SAFE_NAME}.zip" "$FILE_PATH"
             echo "SINGLE_FILE=true" >> $GITHUB_ENV
           else
-            echo "File is larger than split size. Creating split ZIP."
             cd downloads
             zip -r -0 -s ${PARTS_SIZE}m "../tmpzip/${SAFE_NAME}.zip" "."
             cd ..
@@ -88,17 +81,22 @@ jobs:
             cd ..
           fi
 
-      - name: Create persistent branch
+      - name: Update persistent branch (overwrite)
         run: |
-          BRANCH_NAME="md-parts-$(date +'%Y%m%d-%H%M%S')"
+          BRANCH_NAME="md-parts"
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
+          
+          # Delete the old branch if it exists
+          git push origin --delete $BRANCH_NAME 2>/dev/null || true
+          
+          # Create a fresh orphan branch
           git checkout --orphan $BRANCH_NAME
           git rm -rf . || true
           cp -r tmpzip/* . 2>/dev/null || true
           git add .
-          git commit -m "File parts for ${{ env.SAFE_NAME }}"
+          git commit -m "File parts for ${{ env.SAFE_NAME }} - $(date +'%Y%m%d %H:%M:%S')"
           git push origin $BRANCH_NAME
 
       - name: Send completion message
@@ -117,14 +115,13 @@ jobs:
             MESSAGE="✅ File ready: ${SAFE_NAME}%0A%0A"
             MESSAGE="${MESSAGE}Total parts: ${TOTAL_PARTS}%0A"
             MESSAGE="${MESSAGE}Branch: ${BRANCH_NAME}%0A%0A"
-            MESSAGE="${MESSAGE}To download all parts:%0A"
-            MESSAGE="${MESSAGE}https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${SAFE_NAME}.z01%0A"
-            MESSAGE="${MESSAGE}...%0A"
-            MESSAGE="${MESSAGE}https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${SAFE_NAME}.zip%0A%0A"
+            MESSAGE="${MESSAGE}Base URL for parts:%0A"
+            MESSAGE="${MESSAGE}https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/%0A%0A"
+            MESSAGE="${MESSAGE}Files: ${SAFE_NAME}.z01 to ${SAFE_NAME}.z$(printf "%02d" $TOTAL_PARTS) and ${SAFE_NAME}.zip%0A%0A"
             MESSAGE="${MESSAGE}If a part is missing, use MD Bot - Resender%0A"
             MESSAGE="${MESSAGE}Branch: ${BRANCH_NAME}%0A"
             MESSAGE="${MESSAGE}Part number: (e.g., 5)%0A%0A"
-            MESSAGE="${MESSAGE}⚠️ Run MD Bot - Cleanup when done to delete this branch."
+            MESSAGE="${MESSAGE}⚠️ Run MD Bot - Cleanup when done to delete the branch."
           fi
           
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
