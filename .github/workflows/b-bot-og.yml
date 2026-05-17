@@ -183,7 +183,7 @@ jobs:
           
           ls -lh video.z*
 
-      - name: Send parts one by one to Bale as Documents (with Retry)
+      - name: Send parts one by one to Bale as Documents
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
@@ -194,42 +194,6 @@ jobs:
             echo "Invalid delay value. Using default 2 seconds."
             DELAY=2
           fi
-          
-          # Retry function for sending a single file
-          send_with_retry() {
-            local file_path="$1"
-            local caption_text="$2"
-            local max_retries=3
-            local attempt=1
-            
-            while [ $attempt -le $max_retries ]; do
-              echo "  Attempt $attempt of $max_retries..."
-              
-              RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
-                -F "chat_id=${CHAT_ID}" \
-                -F "document=@${file_path}" \
-                -F "caption=${caption_text}")
-              
-              HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-              
-              if [ "$HTTP_CODE" -eq 200 ]; then
-                echo "  ✅ Sent successfully on attempt $attempt"
-                return 0
-              else
-                echo "  ❌ Failed with HTTP $HTTP_CODE (attempt $attempt)"
-                if [ $attempt -lt $max_retries ]; then
-                  sleep_time=$((2 ** attempt))
-                  echo "  ⏳ Retrying in $sleep_time seconds..."
-                  sleep $sleep_time
-                fi
-              fi
-              
-              attempt=$((attempt + 1))
-            done
-            
-            echo "  ❌ Failed after $max_retries attempts"
-            return 1
-          }
           
           cd parts
           
@@ -247,12 +211,12 @@ jobs:
             echo "📄 Sending README.txt with reassembly instructions..."
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             
-            if send_with_retry "README.txt" "📋 HOW TO REASSEMBLE THE VIDEO:%0A%0A1. Download all parts (.z01, .z02, etc.)%0A2. Save them in the same folder%0A3. Run: cat video.z* > original_video.mp4%0A%0AThe video will be restored!"; then
-              echo "✅ README.txt sent"
-            else
-              echo "❌ Failed to send README.txt after retries"
-              FAILED_PARTS="$FAILED_PARTS README"
-            fi
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+              -F "chat_id=${CHAT_ID}" \
+              -F "document=@README.txt" \
+              -F "caption=📋 HOW TO REASSEMBLE THE VIDEO:%0A%0A1. Download all parts (.z01, .z02, etc.)%0A2. Save them in the same folder%0A3. Run: cat video.z* > original_video.mp4%0A%0AThe video will be restored!"
+            
+            echo "✅ README.txt sent"
             sleep $DELAY
           fi
           
@@ -264,17 +228,26 @@ jobs:
             echo "📤 Sending part $PART_NUM of $TOTAL_PARTS: $part (${FILE_SIZE_MB} MB)"
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             
-            CAPTION="🎬 Video: ${{ env.SAFE_NAME }}%0A📦 Part: ${PART_NUM}/${TOTAL_PARTS} (.z$(printf "%02d" $PART_NUM))%0A🎚️ Quality: ${{ inputs.quality }}%0A📁 Size: ${FILE_SIZE_MB} MB%0A🔗 Source: ${{ inputs.youtube_url }}%0A%0A📋 You need ALL parts to reassemble the video!"
+            # Using sendDocument with document= (correct for .z01, .z02 files)
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+              -F "chat_id=${CHAT_ID}" \
+              -F "document=@${part}" \
+              -F "caption=🎬 Video: ${{ env.SAFE_NAME }}%0A📦 Part: ${PART_NUM}/${TOTAL_PARTS} (.z$(printf "%02d" $PART_NUM))%0A🎚️ Quality: ${{ inputs.quality }}%0A📁 Size: ${FILE_SIZE_MB} MB%0A🔗 Source: ${{ inputs.youtube_url }}%0A%0A📋 You need ALL parts to reassemble the video!")
             
-            if send_with_retry "$part" "$CAPTION"; then
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            BODY=$(echo "$RESPONSE" | sed '$d')
+            
+            if [ "$HTTP_CODE" -eq 200 ]; then
               echo "✅ Part $PART_NUM sent successfully!"
             else
-              echo "❌ Failed to send part $PART_NUM after retries"
+              echo "❌ Failed to send part $PART_NUM (HTTP $HTTP_CODE)"
+              echo "Response: $BODY"
               FAILED_PARTS="$FAILED_PARTS $PART_NUM"
             fi
             
             PART_NUM=$((PART_NUM + 1))
             
+            # Use custom delay before next part (except after the last part)
             if [ $PART_NUM -le $TOTAL_PARTS ]; then
               echo "⏳ Waiting $DELAY seconds before next part..."
               sleep $DELAY
@@ -289,7 +262,7 @@ jobs:
             MESSAGE="✅ DOWNLOAD COMPLETE!%0A%0A📹 Video: ${{ env.SAFE_NAME }}%0A📦 Total parts: ${TOTAL_PARTS}%0A🎬 Quality: ${{ inputs.quality }}%0A🔗 Source: ${{ inputs.youtube_url }}%0A%0A✨ All parts sent successfully! (Delay: ${DELAY}s between parts)%0A%0A📋 To reassemble:%0A1. Download all parts (.z01, .z02, ...)%0A2. Save them in the same folder%0A3. Run: cat video.z* > original_video.mp4%0A%0AThe video will be restored!"
             echo "✅ All $TOTAL_PARTS parts sent successfully!"
           else
-            MESSAGE="⚠️ DOWNLOAD PARTIALLY COMPLETE%0A%0A📹 Video: ${{ env.SAFE_NAME }}%0A📦 Total parts: ${TOTAL_PARTS}%0A❌ Failed parts:${FAILED_PARTS}%0A🎬 Quality: ${{ inputs.quality }}%0A🔗 Source: ${{ inputs.youtube_url }}%0A%0A⚠️ Some parts failed after retries. Please re-run the workflow."
+            MESSAGE="⚠️ DOWNLOAD PARTIALLY COMPLETE%0A%0A📹 Video: ${{ env.SAFE_NAME }}%0A📦 Total parts: ${TOTAL_PARTS}%0A❌ Failed parts:${FAILED_PARTS}%0A🎬 Quality: ${{ inputs.quality }}%0A🔗 Source: ${{ inputs.youtube_url }}%0A%0A⚠️ Some parts failed. Please re-run the workflow."
             echo "⚠️ Some parts failed: $FAILED_PARTS"
           fi
           
