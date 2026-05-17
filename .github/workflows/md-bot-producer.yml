@@ -86,7 +86,7 @@ jobs:
             cd ..
           fi
 
-      - name: Save parts to persistent branch
+      - name: Save parts to persistent branch (batches of 5)
         run: |
           BRANCH_NAME="md-parts"
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
@@ -96,13 +96,58 @@ jobs:
           # Delete old branch if exists
           git push origin --delete $BRANCH_NAME 2>/dev/null || true
           
-          # Create fresh branch with all parts
+          # Create fresh orphan branch
           git checkout --orphan $BRANCH_NAME
           git rm -rf . || true
+          
+          # Copy all files to the branch root
           cp -r tmpzip/* . 2>/dev/null || true
-          git add .
-          git commit -m "File parts for ${{ env.SAFE_NAME }} - $(date +'%Y%m%d %H:%M:%S')"
+          
+          # Get list of files to commit
+          FILES=$(ls -1 2>/dev/null | sort -V)
+          TOTAL_FILES=$(echo "$FILES" | wc -l)
+          
+          if [ "$TOTAL_FILES" -eq 0 ]; then
+            echo "No files to commit"
+            exit 1
+          fi
+          
+          echo "Total files to commit: $TOTAL_FILES"
+          
+          # Commit in batches of 5
+          BATCH_SIZE=5
+          BATCH_NUM=1
+          TEMP_LIST=$(mktemp)
+          echo "$FILES" > "$TEMP_LIST"
+          
+          while [ $(cat "$TEMP_LIST" | wc -l) -gt 0 ]; do
+            # Take first BATCH_SIZE files
+            BATCH_FILES=$(head -n $BATCH_SIZE "$TEMP_LIST")
+            
+            # Remove these files from the list
+            tail -n +$((BATCH_SIZE + 1)) "$TEMP_LIST" > "$TEMP_LIST.tmp" 2>/dev/null || true
+            mv "$TEMP_LIST.tmp" "$TEMP_LIST"
+            
+            # Add this batch of files
+            for file in $BATCH_FILES; do
+              if [ -f "$file" ]; then
+                git add "$file"
+                echo "  Added: $file"
+              fi
+            done
+            
+            # Commit this batch
+            git commit -m "[bot] Batch $BATCH_NUM: Add $(echo $BATCH_FILES | wc -w) files"
+            echo "✅ Batch $BATCH_NUM committed ($(echo $BATCH_FILES | wc -w) files)"
+            
+            BATCH_NUM=$((BATCH_NUM + 1))
+          done
+          
+          rm -f "$TEMP_LIST"
+          
+          # Push all batches to the branch
           git push origin $BRANCH_NAME
+          echo "✅ All $TOTAL_FILES files pushed to branch $BRANCH_NAME in $((BATCH_NUM - 1)) batches"
 
       - name: Send parts to Bale one by one
         run: |
