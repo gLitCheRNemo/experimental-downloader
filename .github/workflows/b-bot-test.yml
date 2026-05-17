@@ -127,11 +127,11 @@ jobs:
           TOTAL_PARTS=$(ls -1 ${SAFE_NAME}.z* ${SAFE_NAME}.zip 2>/dev/null | wc -l)
           echo "TOTAL_PARTS=$TOTAL_PARTS" >> $GITHUB_ENV
           cat > README.txt << 'EOF'
-HOW TO EXTRACT:
-1. Download ALL parts to the same folder
-2. Extract the .zip file with ZArchiver
-3. The video will be restored automatically
-EOF
+            HOW TO EXTRACT:
+            1. Download ALL parts to the same folder
+            2. Extract the .zip file with ZArchiver
+            3. The video will be restored automatically
+          EOF
 
       - name: Send to Bale
         run: |
