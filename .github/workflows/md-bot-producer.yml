@@ -35,12 +35,30 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          persist-credentials: true
           fetch-depth: 0
 
       - name: Mask sensitive inputs
         run: |
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
+
+      - name: Prepare md-parts branch
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git fetch origin
+
+          if git ls-remote --exit-code --heads origin md-parts; then
+            git checkout md-parts
+            git pull origin md-parts
+          else
+            git checkout --orphan md-parts
+            git rm -rf . || true
+            mkdir -p md-parts
+            git commit --allow-empty -m "[bot] Initialize md-parts branch"
+            git push --set-upstream origin md-parts
+          fi
 
       - name: Install dependencies
         run: |
@@ -52,9 +70,22 @@ jobs:
         id: download
         run: |
           MAGNET="${{ inputs.magnet_link }}"
-          mkdir -p downloads
-          cd downloads
-          aria2c --seed-time=0 --max-connection-per-server=16 --split=16 --console-log-level=error "$MAGNET"
+          mkdir -p tmpmagnet
+          cd tmpmagnet
+          
+          aria2c \
+            --enable-dht=true \
+            --bt-enable-lpd=true \
+            --bt-max-peers=0 \
+            --seed-time=0 \
+            --follow-torrent=true \
+            --check-integrity=true \
+            --dir=. \
+            "$MAGNET"
+          
+          echo "Download completed"
+          
+          # Find the downloaded file/directory
           FILE=$(ls -1 | head -n 1)
           SAFE_NAME=$(echo "$FILE" | sed 's/ /_/g' | sed 's/[^a-zA-Z0-9._-]/_/g')
           echo "FILE=$FILE" >> $GITHUB_ENV
@@ -66,88 +97,92 @@ jobs:
         run: |
           PARTS_SIZE="${{ inputs.parts_size }}"
           SAFE_NAME="${{ env.SAFE_NAME }}"
-          FILE_PATH="downloads/${{ env.FILE }}"
-          FILE_SIZE=$(stat -c%s "$FILE_PATH")
-          FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
+          FILE_PATH="tmpmagnet/${{ env.FILE }}"
           
-          mkdir -p tmpzip
-          
-          if [ $FILE_SIZE_MB -le $PARTS_SIZE ]; then
-            zip -0 "tmpzip/${SAFE_NAME}.zip" "$FILE_PATH"
-            echo "SINGLE_FILE=true" >> $GITHUB_ENV
+          # Check if it's a file or directory
+          if [ -d "$FILE_PATH" ]; then
+            # It's a directory - zip the contents
+            echo "Zipping directory contents"
+            cd tmpmagnet
+            zip -0 -r -s ${PARTS_SIZE}m "../md-parts/${SAFE_NAME}.zip" "${{ env.FILE }}"
+            cd ..
           else
-            cd downloads
-            zip -r -0 -s ${PARTS_SIZE}m "../tmpzip/${SAFE_NAME}.zip" "."
-            cd ..
-            cd tmpzip
-            TOTAL_PARTS=$(ls -1 ${SAFE_NAME}.z* 2>/dev/null | wc -l)
-            echo "TOTAL_PARTS=$TOTAL_PARTS" >> $GITHUB_ENV
-            echo "SINGLE_FILE=false" >> $GITHUB_ENV
-            cd ..
+            # It's a single file
+            FILE_SIZE=$(stat -c%s "$FILE_PATH")
+            FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
+            
+            mkdir -p tmpzip
+            
+            if [ $FILE_SIZE_MB -le $PARTS_SIZE ]; then
+              echo "File is smaller than split size. Creating single ZIP."
+              zip -0 "tmpzip/${SAFE_NAME}.zip" "$FILE_PATH"
+              cp tmpzip/${SAFE_NAME}.zip md-parts/
+            else
+              echo "File is larger than split size. Creating split ZIP."
+              cd tmpmagnet
+              zip -0 -r -s ${PARTS_SIZE}m "../tmpzip/${SAFE_NAME}.zip" "${{ env.FILE }}"
+              cd ..
+              cp tmpzip/${SAFE_NAME}.z* tmpzip/${SAFE_NAME}.zip md-parts/ 2>/dev/null || true
+            fi
           fi
 
-      - name: Save parts to persistent branch (batches of 5)
+      - name: Commit and Push in Batches of 5
         run: |
-          BRANCH_NAME="md-parts"
-          echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
+          # Ensure we are on the md-parts branch
+          git checkout md-parts
           
-          # Delete old branch if exists
-          git push origin --delete $BRANCH_NAME 2>/dev/null || true
-          
-          # Create fresh orphan branch
-          git checkout --orphan $BRANCH_NAME
-          git rm -rf . || true
-          
-          # Copy all files to the branch root
-          cp -r tmpzip/* . 2>/dev/null || true
-          
-          # Get list of files to commit
-          FILES=$(ls -1 2>/dev/null | sort -V)
-          TOTAL_FILES=$(echo "$FILES" | wc -l)
-          
-          if [ "$TOTAL_FILES" -eq 0 ]; then
-            echo "No files to commit"
-            exit 1
+          # Check if md-parts directory has files
+          if [ ! -d "md-parts" ] || [ -z "$(ls -A md-parts 2>/dev/null)" ]; then
+            echo "No files found in md-parts directory. Skipping commit."
+            exit 0
           fi
           
+          # Store list of files
+          ls md-parts/* 2>/dev/null > file_list.txt || true
+          
+          TOTAL_FILES=$(cat file_list.txt | wc -l)
           echo "Total files to commit: $TOTAL_FILES"
           
-          # Commit in batches of 5
+          if [ "$TOTAL_FILES" -eq 0 ]; then
+            echo "No new files to commit"
+            rm -f file_list.txt
+            exit 0
+          fi
+          
           BATCH_SIZE=5
           BATCH_NUM=1
-          TEMP_LIST=$(mktemp)
-          echo "$FILES" > "$TEMP_LIST"
           
-          while [ $(cat "$TEMP_LIST" | wc -l) -gt 0 ]; do
-            # Take first BATCH_SIZE files
-            BATCH_FILES=$(head -n $BATCH_SIZE "$TEMP_LIST")
+          while [ $(cat file_list.txt | wc -l) -gt 0 ]; do
+            BATCH_FILES=$(head -n $BATCH_SIZE file_list.txt)
             
-            # Remove these files from the list
-            tail -n +$((BATCH_SIZE + 1)) "$TEMP_LIST" > "$TEMP_LIST.tmp" 2>/dev/null || true
-            mv "$TEMP_LIST.tmp" "$TEMP_LIST"
+            tail -n +$((BATCH_SIZE + 1)) file_list.txt > temp_list.txt 2>/dev/null || touch temp_list.txt
+            mv temp_list.txt file_list.txt
             
-            # Add this batch of files
+            echo "📦 Processing batch $BATCH_NUM with $(echo $BATCH_FILES | wc -w) files..."
+            
             for file in $BATCH_FILES; do
               if [ -f "$file" ]; then
                 git add "$file"
-                echo "  Added: $file"
+                echo "  Added: $(basename "$file")"
               fi
             done
             
-            # Commit this batch
-            git commit -m "[bot] Batch $BATCH_NUM: Add $(echo $BATCH_FILES | wc -w) files"
-            echo "✅ Batch $BATCH_NUM committed ($(echo $BATCH_FILES | wc -w) files)"
+            # Only commit if there are changes
+            if ! git diff --cached --quiet; then
+              git commit -m "[bot] Add magnet files batch $BATCH_NUM ($(echo $BATCH_FILES | wc -w) files)"
+              git push origin md-parts
+              echo "✅ Batch $BATCH_NUM committed and pushed successfully"
+            else
+              echo "⚠️ No changes to commit in batch $BATCH_NUM"
+            fi
             
             BATCH_NUM=$((BATCH_NUM + 1))
+            
+            sleep 2
           done
           
-          rm -f "$TEMP_LIST"
-          
-          # Push all batches to the branch
-          git push origin $BRANCH_NAME
-          echo "✅ All $TOTAL_FILES files pushed to branch $BRANCH_NAME in $((BATCH_NUM - 1)) batches"
+          echo "✅ All $TOTAL_FILES files committed and pushed successfully to md-parts branch in $((BATCH_NUM - 1)) batches"
+          rm -f file_list.txt temp_list.txt
 
       - name: Send parts to Bale one by one
         run: |
@@ -155,8 +190,8 @@ jobs:
           CHAT_ID="${{ inputs.bale_chat_id }}"
           DELAY="${{ inputs.delay_seconds }}"
           SAFE_NAME="${{ env.SAFE_NAME }}"
-          BRANCH_NAME="${{ env.BRANCH_NAME }}"
           REPO="${{ github.repository }}"
+          BRANCH_NAME="md-parts"
           
           if ! [[ "$DELAY" =~ ^[0-9]+$ ]]; then
             DELAY=2
@@ -168,54 +203,47 @@ jobs:
             -d "chat_id=${CHAT_ID}" \
             -d "text=${VIDEO_NAME}%0A⬇️"
           
-          if [ "${{ env.SINGLE_FILE }}" = "true" ]; then
-            # Send single zip file
-            RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${SAFE_NAME}.zip"
-            curl -L -o "${SAFE_NAME}.zip" "$RAW_URL"
-            SIZE=$(stat -c%s "${SAFE_NAME}.zip")
-            SIZE_MB=$((SIZE / 1024 / 1024))
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
-              -F "chat_id=${CHAT_ID}" \
-              -F "document=@${SAFE_NAME}.zip" \
-              -F "caption=${VIDEO_NAME} | ${SIZE_MB}MB"
-          else
-            # Send each .z* part
-            TOTAL_PARTS=${{ env.TOTAL_PARTS }}
-            for PART_NUM in $(seq 1 $TOTAL_PARTS); do
-              PART_NUM_PADDED=$(printf "%02d" $PART_NUM)
-              FILE_NAME="${SAFE_NAME}.z${PART_NUM_PADDED}"
-              RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${FILE_NAME}"
-              
-              echo "Downloading and sending $FILE_NAME (Part $PART_NUM of $TOTAL_PARTS)"
-              curl -L -o "$FILE_NAME" "$RAW_URL"
-              
+          # Get list of files from the branch
+          echo "Fetching file list from md-parts branch..."
+          FILES=$(git ls-tree md-parts --name-only | sort -V)
+          TOTAL_FILES=$(echo "$FILES" | wc -l)
+          
+          echo "Found $TOTAL_FILES files to send"
+          
+          for FILE_NAME in $FILES; do
+            RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${FILE_NAME}"
+            
+            echo "Downloading and sending $FILE_NAME"
+            curl -L -o "$FILE_NAME" "$RAW_URL"
+            
+            if [ -f "$FILE_NAME" ]; then
               SIZE=$(stat -c%s "$FILE_NAME")
               SIZE_MB=$((SIZE / 1024 / 1024))
+              
+              if [[ "$FILE_NAME" == *.zip ]]; then
+                CAPTION="FINAL - Extract this file | ${SIZE_MB}MB"
+              else
+                # Extract part number
+                PART_NUM=$(echo "$FILE_NAME" | grep -o 'z[0-9]*' | sed 's/z//')
+                CAPTION="Part $PART_NUM of $TOTAL_PARTS | ${SIZE_MB}MB"
+              fi
               
               curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
                 -F "chat_id=${CHAT_ID}" \
                 -F "document=@${FILE_NAME}" \
-                -F "caption=Part $PART_NUM of $TOTAL_PARTS | ${SIZE_MB}MB"
+                -F "caption=${CAPTION}"
               
               rm -f "$FILE_NAME"
               sleep $DELAY
-            done
-            
-            # Send final .zip file
-            RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${SAFE_NAME}.zip"
-            curl -L -o "${SAFE_NAME}.zip" "$RAW_URL"
-            SIZE=$(stat -c%s "${SAFE_NAME}.zip")
-            SIZE_MB=$((SIZE / 1024 / 1024))
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
-              -F "chat_id=${CHAT_ID}" \
-              -F "document=@${SAFE_NAME}.zip" \
-              -F "caption=FINAL - Extract this file | ${SIZE_MB}MB"
-          fi
+            else
+              echo "Failed to download $FILE_NAME"
+            fi
+          done
           
           # Send completion message
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            -d "text=✅ Done! Branch: ${BRANCH_NAME} | Total parts: ${{ env.TOTAL_PARTS }} | Delay: ${DELAY}s%0A%0A⚠️ Run Cleanup when done to delete the branch."
+            -d "text=✅ Done! Branch: ${BRANCH_NAME} | Total files: ${TOTAL_FILES} | Delay: ${DELAY}s%0A%0A⚠️ Run Cleanup when done to delete the branch."
 
       - name: Cleanup local files
-        run: rm -rf downloads tmpzip
+        run: rm -rf tmpmagnet tmpzip
