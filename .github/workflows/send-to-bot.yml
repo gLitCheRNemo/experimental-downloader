@@ -1,4 +1,4 @@
-name: 4- Send To Bot
+name: 2- Send To Bot
 
 on:
   workflow_dispatch:
