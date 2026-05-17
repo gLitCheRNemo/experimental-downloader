@@ -27,16 +27,21 @@ jobs:
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
 
-      - name: Fetch file list from branch
+      - name: Fetch README and file list from branch
         run: |
           BRANCH_NAME="md-parts"
           REPO="${{ github.repository }}"
           
-          # Get the list of files from the branch
+          # Clone just the branch
           git clone --depth 1 --branch $BRANCH_NAME "https://github.com/${REPO}.git" branch_files
           cd branch_files
           echo "Files in branch:"
           ls -la
+          
+          # Read the README to find all files
+          echo ""
+          echo "README.md contents:"
+          cat README.md 2>/dev/null || echo "No README.md found"
           cd ..
           
           # Find the base name (e.g., video_name)
@@ -64,7 +69,7 @@ jobs:
           
           RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${FILE_NAME}"
           
-          echo "Downloading: $FILE_NAME"
+          echo "Downloading: $FILE_NAME from $RAW_URL"
           curl -L -o "$FILE_NAME" "$RAW_URL"
           
           if [ ! -f "$FILE_NAME" ]; then
