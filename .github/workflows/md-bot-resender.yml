@@ -3,12 +3,8 @@ name: 2- MD Bot - Resender
 on:
   workflow_dispatch:
     inputs:
-      branch_name:
-        description: Branch name (e.g., md-parts-20260517-143000)
-        required: true
-        type: string
       part_number:
-        description: Missing part number (e.g., 5)
+        description: Missing part number (e.g., 15 for .z15, or "final" for .zip)
         required: true
         type: string
       bale_token:
@@ -31,47 +27,61 @@ jobs:
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
 
-      - name: Download specific part from branch
-        run: |
-          BRANCH="${{ inputs.branch_name }}"
-          PART_NUM="${{ inputs.part_number }}"
-          REPO="${{ github.repository }}"
-          PART_NUM_PADDED=$(printf "%02d" $PART_NUM)
-          
-          RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/"
-          
-          # Try to find the file
-          curl -L -o "missing_part.z${PART_NUM_PADDED}" "${RAW_URL}*.z${PART_NUM_PADDED}" 2>/dev/null || true
-          
-          # Also try without leading zero
-          if [ ! -f "missing_part.z${PART_NUM_PADDED}" ]; then
-            curl -L -o "missing_part.z${PART_NUM}" "${RAW_URL}*.z${PART_NUM}" 2>/dev/null || true
-          fi
-          
-          # Find any downloaded file
-          FILE=$(ls missing_part.z* 2>/dev/null | head -1)
-          
-          if [ -z "$FILE" ]; then
-            echo "ERROR: Part not found"
-            exit 1
-          fi
-          
-          echo "FILE=$FILE" >> $GITHUB_ENV
-
-      - name: Send missing part to Bale
+      - name: Resend missing part
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
           PART_NUM="${{ inputs.part_number }}"
-          FILE="${{ env.FILE }}"
-          SIZE=$(stat -c%s "$FILE")
+          BRANCH_NAME="md-parts"
+          REPO="${{ github.repository }}"
+          
+          # Determine which file to fetch
+          if [ "$PART_NUM" = "final" ] || [ "$PART_NUM" = "0" ]; then
+            # Find the .zip file name in the branch
+            RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/"
+            # Get the list of files in the branch
+            ZIP_FILE=$(curl -s "https://api.github.com/repos/${REPO}/contents/${BRANCH_NAME}" | grep -o '"name": "[^"]*\.zip"' | head -1 | cut -d'"' -f4)
+            
+            if [ -z "$ZIP_FILE" ]; then
+              echo "ERROR: Could not find .zip file in branch"
+              exit 1
+            fi
+            
+            FILE_NAME="$ZIP_FILE"
+            RAW_URL="${RAW_URL}${FILE_NAME}"
+            CAPTION="📦 FINAL PART (Extract this file)"
+          else
+            # Format part number with leading zero (e.g., 5 -> 05)
+            PART_NUM_PADDED=$(printf "%02d" $PART_NUM)
+            # Find the base filename (e.g., video_name)
+            BASE_NAME=$(curl -s "https://api.github.com/repos/${REPO}/contents/${BRANCH_NAME}" | grep -o '"name": "[^"]*\.z[0-9][0-9]"' | head -1 | cut -d'"' -f4 | sed 's/\.z[0-9][0-9]$//')
+            
+            if [ -z "$BASE_NAME" ]; then
+              echo "ERROR: Could not find base filename in branch"
+              exit 1
+            fi
+            
+            FILE_NAME="${BASE_NAME}.z${PART_NUM_PADDED}"
+            RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${FILE_NAME}"
+            CAPTION="📦 Missing Part ${PART_NUM}"
+          fi
+          
+          echo "Downloading: $FILE_NAME"
+          curl -L -o "$FILE_NAME" "$RAW_URL"
+          
+          if [ ! -f "$FILE_NAME" ]; then
+            echo "ERROR: Failed to download $FILE_NAME"
+            exit 1
+          fi
+          
+          SIZE=$(stat -c%s "$FILE_NAME")
           SIZE_MB=$((SIZE / 1024 / 1024))
           
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
             -F "chat_id=${CHAT_ID}" \
-            -F "document=@${FILE}" \
-            -F "caption=📦 Missing Part ${PART_NUM} | ${SIZE_MB} MB"
+            -F "document=@${FILE_NAME}" \
+            -F "caption=${CAPTION} | ${SIZE_MB} MB"
           
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            -d "text=✅ Part ${PART_NUM} sent!"
+            -d "text=✅ ${FILE_NAME} sent!"
