@@ -27,6 +27,22 @@ jobs:
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
 
+      - name: Fetch file list from branch
+        run: |
+          BRANCH_NAME="md-parts"
+          REPO="${{ github.repository }}"
+          
+          # Get the list of files from the branch
+          git clone --depth 1 --branch $BRANCH_NAME "https://github.com/${REPO}.git" branch_files
+          cd branch_files
+          echo "Files in branch:"
+          ls -la
+          cd ..
+          
+          # Find the base name (e.g., video_name)
+          BASE_NAME=$(ls branch_files | grep -v README.md | grep '\.z' | head -1 | sed 's/\.z[0-9][0-9]$//')
+          echo "BASE_NAME=$BASE_NAME" >> $GITHUB_ENV
+
       - name: Resend missing part
         run: |
           TOKEN="${{ inputs.bale_token }}"
@@ -34,37 +50,19 @@ jobs:
           PART_NUM="${{ inputs.part_number }}"
           BRANCH_NAME="md-parts"
           REPO="${{ github.repository }}"
+          BASE_NAME="${{ env.BASE_NAME }}"
           
           # Determine which file to fetch
           if [ "$PART_NUM" = "final" ] || [ "$PART_NUM" = "0" ]; then
-            # Find the .zip file name in the branch
-            RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/"
-            # Get the list of files in the branch
-            ZIP_FILE=$(curl -s "https://api.github.com/repos/${REPO}/contents/${BRANCH_NAME}" | grep -o '"name": "[^"]*\.zip"' | head -1 | cut -d'"' -f4)
-            
-            if [ -z "$ZIP_FILE" ]; then
-              echo "ERROR: Could not find .zip file in branch"
-              exit 1
-            fi
-            
-            FILE_NAME="$ZIP_FILE"
-            RAW_URL="${RAW_URL}${FILE_NAME}"
+            FILE_NAME="${BASE_NAME}.zip"
             CAPTION="📦 FINAL PART (Extract this file)"
           else
-            # Format part number with leading zero (e.g., 5 -> 05)
             PART_NUM_PADDED=$(printf "%02d" $PART_NUM)
-            # Find the base filename (e.g., video_name)
-            BASE_NAME=$(curl -s "https://api.github.com/repos/${REPO}/contents/${BRANCH_NAME}" | grep -o '"name": "[^"]*\.z[0-9][0-9]"' | head -1 | cut -d'"' -f4 | sed 's/\.z[0-9][0-9]$//')
-            
-            if [ -z "$BASE_NAME" ]; then
-              echo "ERROR: Could not find base filename in branch"
-              exit 1
-            fi
-            
             FILE_NAME="${BASE_NAME}.z${PART_NUM_PADDED}"
-            RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${FILE_NAME}"
             CAPTION="📦 Missing Part ${PART_NUM}"
           fi
+          
+          RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${FILE_NAME}"
           
           echo "Downloading: $FILE_NAME"
           curl -L -o "$FILE_NAME" "$RAW_URL"
