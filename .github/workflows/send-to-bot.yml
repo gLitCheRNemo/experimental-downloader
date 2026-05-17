@@ -1,0 +1,155 @@
+name: 4- Send To Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: Branch name (e.g., md-parts-20260517-143000)
+        required: true
+        type: string
+      line_numbers:
+        description: Line numbers in README.md (e.g., 5 12 18)
+        required: true
+        type: string
+      bale_token:
+        description: Bale Bot Token
+        required: true
+        type: string
+      bale_chat_id:
+        description: Bale Chat ID
+        required: true
+        type: string
+
+jobs:
+  resend:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Mask sensitive inputs
+        run: |
+          echo "::add-mask::${{ inputs.bale_token }}"
+          echo "::add-mask::${{ inputs.bale_chat_id }}"
+
+      - name: Fetch README.md from branch
+        run: |
+          BRANCH="${{ inputs.branch_name }}"
+          REPO="${{ github.repository }}"
+          
+          # Download README.md directly from the branch
+          RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/README.md"
+          echo "Downloading README from: $RAW_URL"
+          
+          curl -L -o README.md "$RAW_URL"
+          
+          if [ ! -f "README.md" ]; then
+            echo "ERROR: Could not download README.md from branch $BRANCH"
+            exit 1
+          fi
+          
+          echo "README.md downloaded successfully"
+          echo "Contents:"
+          cat README.md
+
+      - name: Extract and send files by line number
+        run: |
+          TOKEN="${{ inputs.bale_token }}"
+          CHAT_ID="${{ inputs.bale_chat_id }}"
+          BRANCH="${{ inputs.branch_name }}"
+          REPO="${{ github.repository }}"
+          LINE_NUMBERS="${{ inputs.line_numbers }}"
+          
+          # Send header message
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=📦 Resending files from branch: ${BRANCH}%0A📄 Using line numbers: ${LINE_NUMBERS}"
+          
+          # Process each line number
+          for LINE_NUM in $LINE_NUMBERS; do
+            echo "=========================================="
+            echo "Processing line number: $LINE_NUM"
+            echo "=========================================="
+            
+            # Extract the line from README.md
+            LINE_CONTENT=$(sed -n "${LINE_NUM}p" README.md)
+            
+            if [ -z "$LINE_CONTENT" ]; then
+              echo "Line $LINE_NUM is empty or does not exist"
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+                -d "chat_id=${CHAT_ID}" \
+                -d "text=❌ Line ${LINE_NUM} is empty or does not exist in README.md"
+              continue
+            fi
+            
+            echo "Line content: $LINE_CONTENT"
+            
+            # Extract the URL from the markdown link format: [filename](url)
+            # Pattern: [something](https://...)
+            URL=$(echo "$LINE_CONTENT" | grep -oP '\((https?://[^)]+)\)' | sed 's/[()]//g')
+            
+            if [ -z "$URL" ]; then
+              # Try alternative: just find http:// or https:// in the line
+              URL=$(echo "$LINE_CONTENT" | grep -oP 'https?://[^\s)]+')
+            fi
+            
+            if [ -z "$URL" ]; then
+              echo "No URL found in line $LINE_NUM"
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+                -d "chat_id=${CHAT_ID}" \
+                -d "text=❌ No download link found on line ${LINE_NUM}"
+              continue
+            fi
+            
+            echo "Found URL: $URL"
+            
+            # Extract filename from URL
+            FILENAME=$(basename "$URL" | sed 's/?.*//')
+            echo "Filename: $FILENAME"
+            
+            # Download the file
+            echo "Downloading $FILENAME..."
+            curl -L -o "$FILENAME" "$URL"
+            
+            if [ ! -f "$FILENAME" ]; then
+              echo "Failed to download file from $URL"
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+                -d "chat_id=${CHAT_ID}" \
+                -d "text=❌ Failed to download file from line ${LINE_NUM}"
+              continue
+            fi
+            
+            # Get file size
+            SIZE=$(stat -c%s "$FILENAME")
+            SIZE_MB=$((SIZE / 1024 / 1024))
+            
+            # Determine caption
+            if [[ "$FILENAME" == *.zip ]]; then
+              CAPTION="📦 FINAL PART (Extract this file) | ${SIZE_MB} MB"
+            else
+              # Extract part number from filename (e.g., video.z05 -> 5)
+              PART_NUM=$(echo "$FILENAME" | grep -o 'z[0-9]*' | sed 's/z//' | sed 's/^0*//')
+              CAPTION="📦 Part ${PART_NUM} | ${SIZE_MB} MB"
+            fi
+            
+            # Send to Bale
+            echo "Sending $FILENAME to Bale..."
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+              -F "chat_id=${CHAT_ID}" \
+              -F "document=@${FILENAME}" \
+              -F "caption=${CAPTION}"
+            
+            echo "✅ Sent: $FILENAME"
+            
+            # Clean up
+            rm -f "$FILENAME"
+            
+            # Small delay between files
+            sleep 1
+          done
+          
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=✅ Done resending requested files."
+
+      - name: Cleanup
+        run: rm -f README.md
