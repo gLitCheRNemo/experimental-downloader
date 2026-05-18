@@ -4,23 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       raw_links:
-        description: 'Raw GitHub links (one per line, or space-separated). If provided, branch_name and part_numbers are ignored.'
-        required: false
-        type: string
-      branch_name:
-        description: 'Branch name (e.g., videos). Used with part_numbers if raw_links is empty.'
-        required: false
-        type: string
-      part_numbers:
-        description: 'Part numbers or ranges (e.g., 1-10 15 20-25 final). 1-10 includes parts 1 through 10.'
-        required: false
+        description: 'Paste any text containing GitHub raw links. Handles markdown list format: - [filename](url)'
+        required: true
         type: string
       bale_token:
-        description: 'Bale Bot Token'
+        description: Bale Bot Token
         required: true
         type: string
       bale_chat_id:
-        description: 'Bale Chat ID'
+        description: Bale Chat ID
         required: true
         type: string
 
@@ -33,110 +25,63 @@ jobs:
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
 
-      - name: Determine source and extract links
+      - name: Extract links from markdown format
         id: extract
         run: |
-          RAW_LINKS="${{ inputs.raw_links }}"
-          BRANCH_NAME="${{ inputs.branch_name }}"
-          PART_NUMBERS="${{ inputs.part_numbers }}"
+          # Save the input text to a file
+          echo "${{ inputs.raw_links }}" > input_text.txt
           
+          # Clear previous files
           > extracted_links.txt
           
-          # Function to expand ranges like 1-10 into a list of numbers
-          expand_ranges() {
-            local input="$1"
-            local result=""
-            for token in $input; do
-              if [[ "$token" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-                start=${BASH_REMATCH[1]}
-                end=${BASH_REMATCH[2]}
-                if [ $start -le $end ]; then
-                  for ((i=start; i<=end; i++)); do
-                    result="$result $i"
-                  done
-                else
-                  for ((i=start; i>=end; i--)); do
-                    result="$result $i"
-                  done
-                fi
-              else
-                result="$result $token"
-              fi
-            done
-            echo "$result"
-          }
+          # Method 1: Extract from markdown links: [text](url)
+          grep -oP '\]\(\Khttps://[^)]+' input_text.txt >> extracted_links.txt 2>/dev/null || true
           
-          # Case 1: raw_links is provided (use it directly)
-          if [ -n "$RAW_LINKS" ]; then
-            echo "Using raw_links input"
-            echo "$RAW_LINKS" | tr ' ' '\n' | grep -E 'https?://' >> extracted_links.txt
-            echo "SOURCE=raw_links" >> $GITHUB_ENV
+          # Method 2: Extract raw URLs (any https://...)
+          grep -oE 'https://[a-zA-Z0-9./_%\-?=]+' input_text.txt >> extracted_links.txt 2>/dev/null || true
           
-          # Case 2: branch_name and part_numbers are provided
-          elif [ -n "$BRANCH_NAME" ] && [ -n "$PART_NUMBERS" ]; then
-            echo "Using branch_name: $BRANCH_NAME"
-            
-            # Expand ranges in part_numbers
-            EXPANDED_PARTS=$(expand_ranges "$PART_NUMBERS")
-            echo "Expanded part numbers: $EXPANDED_PARTS"
-            
-            # Fetch README.md from the branch
-            REPO="${{ github.repository }}"
-            README_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/README.md"
-            echo "Fetching README from: $README_URL"
-            
-            curl -L -o README.md "$README_URL"
-            
-            if [ ! -f "README.md" ]; then
-              echo "❌ Could not fetch README.md from branch: $BRANCH_NAME"
-              exit 1
-            fi
-            
-            echo "✅ README.md fetched successfully"
-            
-            # Extract links for each part number
-            for PART_NUM in $EXPANDED_PARTS; do
-              if [ "$PART_NUM" = "final" ] || [ "$PART_NUM" = "0" ]; then
-                LINK=$(grep -oP '\]\(\Khttps://[^)]+\.zip' README.md | head -1)
-                if [ -n "$LINK" ]; then
-                  echo "$LINK" >> extracted_links.txt
-                  echo "Found link for final .zip"
-                fi
-              else
-                PART_NUM_PADDED=$(printf "%02d" $PART_NUM)
-                LINK=$(grep -oP '\]\(\Khttps://[^)]+\.z'"${PART_NUM_PADDED}" README.md | head -1)
-                if [ -n "$LINK" ]; then
-                  echo "$LINK" >> extracted_links.txt
-                  echo "Found link for .z${PART_NUM_PADDED}"
-                fi
-              fi
-            done
-            echo "SOURCE=branch" >> $GITHUB_ENV
+          # Method 3: Extract URLs that might have special characters
+          grep -oE 'https://github\.com/[^ ]+' input_text.txt >> extracted_links.txt 2>/dev/null || true
+          grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' input_text.txt >> extracted_links.txt 2>/dev/null || true
           
-          else
-            echo "❌ No input provided. Please provide either:"
-            echo "  - raw_links (direct links), or"
-            echo "  - branch_name + part_numbers (to fetch from README.md)"
-            exit 1
-          fi
+          # Filter for raw.githubusercontent.com or github.com raw links
+          grep -E 'raw\.githubusercontent\.com|github\.com/.*/raw/' extracted_links.txt > filtered_links.txt || true
           
-          # Clean up extracted links
-          sed -i 's/^[[:space:]]*//;s/[[:space:]]*$//' extracted_links.txt
+          # Clean up: remove trailing punctuation and quotes
+          sed -i 's/[.,;:)]$//' filtered_links.txt
+          sed -i 's/^"//;s/"$//' filtered_links.txt
+          sed -i 's/^\[//;s/\]$//' filtered_links.txt
+          
+          # Sort and deduplicate
+          sort -u filtered_links.txt -o extracted_links.txt
+          
+          # Remove empty lines
           sed -i '/^$/d' extracted_links.txt
           
+          # Count links
           LINK_COUNT=$(wc -l < extracted_links.txt)
           echo "LINK_COUNT=$LINK_COUNT" >> $GITHUB_ENV
           
           echo "=========================================="
-          echo "Found $LINK_COUNT links to process:"
+          echo "Found $LINK_COUNT links in the text:"
           echo "=========================================="
           cat extracted_links.txt
           echo "=========================================="
           
           if [ "$LINK_COUNT" -eq 0 ]; then
-            echo "❌ No links found to process"
-            exit 1
+            echo "No links found. Here are the first 500 characters of input:"
+            head -c 500 input_text.txt
           fi
+
+      - name: Check if links were found
+        if: env.LINK_COUNT == 0
+        run: |
+          echo "❌ No raw.githubusercontent.com links found in the provided text."
+          echo ""
+          echo "Expected format like:"
+          echo "  - [filename.z01](https://github.com/username/repo/raw/branch/path/file.z01)"
+          echo "  - [filename.z02](https://github.com/username/repo/raw/branch/path/file.z02)"
+          exit 1
 
       - name: Download files using wget
         run: |
@@ -151,8 +96,10 @@ jobs:
               echo "$LINK"
               echo "=========================================="
               
+              # Download with wget (follow redirects, handle GitHub's raw URLs)
               wget --content-disposition --trust-server-names --max-redirect=5 "$LINK"
               
+              # Find the downloaded file
               DOWNLOADED_FILE=$(ls -1 | head -n 1)
               echo "Downloaded file: $DOWNLOADED_FILE"
               
@@ -182,6 +129,7 @@ jobs:
           CHAT_ID="${{ inputs.bale_chat_id }}"
           LINK_COUNT="${{ env.LINK_COUNT }}"
           
+          # Send header message
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
             -d "text=📦 Found ${LINK_COUNT} link(s). Downloading and sending..."
@@ -210,6 +158,7 @@ jobs:
           
           cd ..
           
+          # Send completion message
           SENT_COUNT=$((FILE_NUM - 1))
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
@@ -221,7 +170,6 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Source | ${{ env.SOURCE }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Links found | ${{ env.LINK_COUNT }} |" >> $GITHUB_STEP_SUMMARY
           if [ -f "download_status.txt" ]; then
             SUCCESS_COUNT=$(grep -c ":SUCCESS:" download_status.txt || echo "0")
@@ -230,13 +178,13 @@ jobs:
             echo "| Failed downloads | $FAILED_COUNT |" >> $GITHUB_STEP_SUMMARY
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Processed links:" >> $GITHUB_STEP_SUMMARY
+          echo "### Extracted links:" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           cat extracted_links.txt >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Cleanup
         run: |
-          rm -f README.md download_status.txt extracted_links.txt input_text.txt
+          rm -f download_status.txt extracted_links.txt filtered_links.txt input_text.txt
           rm -rf downloaded_files
           echo "🧹 Cleaned up temporary files"
