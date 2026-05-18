@@ -8,6 +8,11 @@ on:
         required: false
         default: '🚀 Press Run workflow to execute'
         type: string
+      size_limit:
+        description: 'Size limit in MB (files larger than this will be removed from history)'
+        required: false
+        default: '10'
+        type: string
         
 permissions:
   contents: write
@@ -25,7 +30,16 @@ jobs:
 
       - name: 📊 Show repository status summary
         run: |
+          SIZE_LIMIT="${{ github.event.inputs.size_limit }}"
+          SIZE_LIMIT_BYTES=$((SIZE_LIMIT * 1024 * 1024))
+          
           echo "## 📊 Repository Status Before Cleaning" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⚙️ Settings" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Size limit | ${SIZE_LIMIT} MB |" >> $GITHUB_STEP_SUMMARY
+          echo "| Files larger than ${SIZE_LIMIT}MB will be removed | ✅ |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           echo "### 📦 Repository Size" >> $GITHUB_STEP_SUMMARY
@@ -39,12 +53,12 @@ jobs:
           echo "**$(git rev-list --count HEAD)** commits" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          echo "### 📁 Files larger than 20MB in history" >> $GITHUB_STEP_SUMMARY
+          echo "### 📁 Files larger than ${SIZE_LIMIT}MB in history" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           git rev-list --objects --all | \
             git cat-file --batch-check='%(objecttype) %(objectname) %(objectsize) %(rest)' | \
             sed -n 's/^blob //p' | \
-            awk '$2 >= 20971520 { print $3, int($2/1048576) "MB" }' | \
+            awk -v LIMIT=$SIZE_LIMIT_BYTES '$2 >= LIMIT { print $3, int($2/1048576) "MB" }' | \
             sort -k2 -rn | head -20 >> $GITHUB_STEP_SUMMARY || echo "No files found ✅" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
@@ -63,8 +77,11 @@ jobs:
       - name: ⚙️ Install git-filter-repo
         run: pip install git-filter-repo
 
-      - name: 🧹 Remove files larger than 20MB from history
-        run: git filter-repo --strip-blobs-bigger-than 20M --force
+      - name: 🧹 Remove files larger than selected size from history
+        run: |
+          SIZE_LIMIT="${{ github.event.inputs.size_limit }}"
+          echo "Removing files larger than ${SIZE_LIMIT}MB from history..."
+          git filter-repo --strip-blobs-bigger-than ${SIZE_LIMIT}M --force
 
       - name: 🚀 Push changes to repository
         run: |
@@ -76,9 +93,14 @@ jobs:
         run: |
           echo "## ✅ Cleaning completed successfully!" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⚙️ Settings used" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Size limit | ${{ github.event.inputs.size_limit }} MB |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 📏 New repository size" >> $GITHUB_STEP_SUMMARY
           echo "| Item | Size |" >> $GITHUB_STEP_SUMMARY
           echo "|------|------|" >> $GITHUB_STEP_SUMMARY
           echo "| .git folder | $(du -sh .git | cut -f1) |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "🎉 All files larger than 20MB have been removed from history!" >> $GITHUB_STEP_SUMMARY
+          echo "🎉 All files larger than ${{ github.event.inputs.size_limit }}MB have been removed from history!" >> $GITHUB_STEP_SUMMARY
