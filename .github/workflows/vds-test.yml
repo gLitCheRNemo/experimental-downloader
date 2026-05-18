@@ -1,0 +1,376 @@
+name: 6- VDS Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      youtube_url:
+        description: '🔗 YouTube video URL(s)'
+        required: true
+        type: string
+      quality:
+        description: '🎬 Video quality'
+        required: true
+        default: 'best'
+        type: choice
+        options:
+          - best
+          - 2160
+          - 1440
+          - 1080
+          - 720
+          - 480
+          - audio
+      parts_size:
+        description: '🫙 Parts size (MB)'
+        required: false
+        type: string
+        default: '45'
+      output_name:
+        description: '📝 Output file name (optional, without extension)'
+        required: false
+        type: string
+      bale_token:
+        description: '🤖 Bale Bot Token'
+        required: true
+        type: string
+      bale_chat_id:
+        description: '💬 Bale Chat ID'
+        required: true
+        type: string
+
+jobs:
+  # ============================================
+  # JOB 1: Download YouTube video and create README
+  # ============================================
+  download-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Mask sensitive inputs
+        run: |
+          echo "::add-mask::${{ inputs.bale_token }}"
+          echo "::add-mask::${{ inputs.bale_chat_id }}"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Prepare videos branch
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git fetch origin
+
+          if git ls-remote --exit-code --heads origin videos; then
+            git checkout videos
+            git pull origin videos
+          else
+            git checkout --orphan videos
+            git rm -rf . || true
+            mkdir -p videos
+            git commit --allow-empty -m "[bot] Initialize videos branch"
+            git push --set-upstream origin videos
+          fi
+
+      - name: Setup FFmpeg
+        run: |
+          wget https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          tar -xf ffmpeg-master-latest-linux64-gpl.tar.xz
+          sudo mv ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/
+          sudo mv ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/
+          ffmpeg -version
+
+      - name: Setup WARP
+        run: |
+          docker rm -f warp 2>/dev/null || true
+          docker network create warp-net 2>/dev/null || true
+
+          docker run -d \
+            --name warp \
+            --restart=always \
+            --network warp-net \
+            -p 1080:1080 \
+            --cap-add NET_ADMIN \
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            -v warp-data:/var/lib/cloudflare-warp \
+            caomingjun/warp
+
+          echo "Waiting for WARP to initialize..."
+
+          WARP_READY=false
+          for i in {1..10}; do
+            RESULT=$(curl -s --max-time 3 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+            
+            if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
+              echo "WARP proxy is ready! (Took $i attempts)"
+              echo "$RESULT" | grep -E "^(ip|warp|colo)="
+              WARP_READY=true
+              break
+            fi
+            
+            echo "Attempt $i/10 - WARP not ready, waiting 3s..."
+            sleep 3
+          done
+
+          if [ "$WARP_READY" = false ]; then
+            echo "WARP failed to activate fully, continuing anyway..."
+            echo "Last response: $RESULT"
+          fi
+
+      - name: Setup yt-dlp
+        run: |
+          sudo apt-get install -y python3-pip curl
+          pip install yt-dlp --pre
+
+          curl -fsSL https://deno.land/install.sh | sh
+          export DENO_INSTALL="$HOME/.deno"
+          export PATH="$DENO_INSTALL/bin:$PATH"
+          echo "$DENO_INSTALL/bin" >> $GITHUB_PATH
+          deno --version
+          
+      - name: Download videos
+        id: download
+        run: |
+          QUALITY="${{ inputs.quality }}"
+          
+          if [ "$QUALITY" = "audio" ]; then
+            FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
+          elif [ "$QUALITY" = "best" ]; then
+            FORMAT_OPTS="-f bestvideo+bestaudio/best --merge-output-format mp4"
+          else
+            FORMAT_OPTS="-f bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}] --merge-output-format mp4"
+          fi
+
+          OUTPUT_NAME="${{ inputs.output_name }}"
+          if [ -n "$OUTPUT_NAME" ]; then
+            OUTPUT_OPTS="-o ${OUTPUT_NAME}.%(ext)s"
+          else
+            OUTPUT_OPTS=""
+          fi
+          
+          mkdir -p tmpvideos
+          cd tmpvideos
+          yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" $FORMAT_OPTS $OUTPUT_OPTS "${{ inputs.youtube_url }}"
+
+          FILE=$(ls -1 | head -n 1)
+          FILE_NO_EXTENSION="${FILE%.*}"
+          echo "FILE=$FILE" >> $GITHUB_ENV
+          echo "FILE_NO_EXTENSION=$FILE_NO_EXTENSION" >> $GITHUB_ENV
+          SAFE_NAME=$(echo "$FILE" | sed 's/^[[:space:]]*//' | tr ' ' '_')
+          echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
+
+          zip -0 -s "${{ inputs.parts_size }}m" "../videos/${SAFE_NAME}.zip" "$FILE"
+          ls -la
+          
+          docker stop warp || true
+
+      - name: Generate README with Download Links
+        run: |
+          rm -f README.md
+          
+          echo "# 📥 Download Links" > README.md
+          echo "Generated on: $(date)" >> README.md
+          echo "" >> README.md
+          
+          for file in videos/*; do
+            if [ -f "$file" ]; then
+              filename=$(basename "$file")
+              encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
+              url="https://github.com/${{ github.repository }}/raw/videos/videos/$encoded_filename"
+              echo "- [Download $filename]($url)" >> README.md
+            fi
+          done
+
+      - name: Commit and Push in Batches of 5
+        run: |
+          ls videos/* 2>/dev/null > file_list.txt || true
+          
+          TOTAL_FILES=$(cat file_list.txt | wc -l)
+          echo "Total files to commit: $TOTAL_FILES"
+          
+          if [ "$TOTAL_FILES" -eq 0 ]; then
+            echo "No new files to commit"
+            exit 0
+          fi
+          
+          BATCH_SIZE=5
+          BATCH_NUM=1
+          
+          while [ $(cat file_list.txt | wc -l) -gt 0 ]; do
+            BATCH_FILES=$(head -n $BATCH_SIZE file_list.txt)
+            
+            tail -n +$((BATCH_SIZE + 1)) file_list.txt > temp_list.txt 2>/dev/null || touch temp_list.txt
+            mv temp_list.txt file_list.txt
+            
+            for file in $BATCH_FILES; do
+              if [ -f "$file" ]; then
+                git add "$file"
+              fi
+            done
+            
+            if [ $BATCH_NUM -eq 1 ] && [ -f "README.md" ]; then
+              git add README.md
+            fi
+            
+            git commit -m "[bot] Add video files batch $BATCH_NUM ($(echo $BATCH_FILES | wc -w) files)"
+            git push
+            
+            echo "✅ Batch $BATCH_NUM committed and pushed"
+            BATCH_NUM=$((BATCH_NUM + 1))
+            sleep 2
+          done
+          
+          echo "✅ All $TOTAL_FILES files committed and pushed in batches"
+          rm -f file_list.txt temp_list.txt
+
+      - name: Upload README as artifact for next job
+        uses: actions/upload-artifact@v4
+        with:
+          name: readme-file
+          path: README.md
+          retention-days: 1
+
+  # ============================================
+  # JOB 2: Send files to Bale bot using README links
+  # ============================================
+  send-to-bot:
+    runs-on: ubuntu-latest
+    needs: download-and-release
+    if: always() && needs.download-and-release.result == 'success'
+    
+    steps:
+      - name: Mask sensitive inputs
+        run: |
+          echo "::add-mask::${{ inputs.bale_token }}"
+          echo "::add-mask::${{ inputs.bale_chat_id }}"
+
+      - name: Download README artifact from previous job
+        uses: actions/download-artifact@v4
+        with:
+          name: readme-file
+          path: .
+
+      - name: Extract links from README.md
+        id: extract
+        run: |
+          if [ ! -f "README.md" ]; then
+            echo "❌ README.md not found!"
+            exit 1
+          fi
+          
+          grep -oP '\]\(\Khttps://[^)]+' README.md > extracted_links.txt 2>/dev/null || true
+          grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' README.md >> extracted_links.txt 2>/dev/null || true
+          
+          sort -u extracted_links.txt -o extracted_links.txt
+          sed -i '/^$/d' extracted_links.txt
+          
+          LINK_COUNT=$(wc -l < extracted_links.txt)
+          echo "LINK_COUNT=$LINK_COUNT" >> $GITHUB_ENV
+          
+          if [ "$LINK_COUNT" -eq 0 ]; then
+            echo "❌ No download links found in README.md"
+            exit 1
+          fi
+          
+          echo "Found $LINK_COUNT links"
+
+      - name: Download files using wget
+        run: |
+          mkdir -p downloaded_files
+          cd downloaded_files
+          
+          LINK_NUM=1
+          while IFS= read -r LINK; do
+            if [ -n "$LINK" ]; then
+              echo "Downloading file $LINK_NUM: $LINK"
+              wget --content-disposition --trust-server-names --max-redirect=5 "$LINK"
+              LINK_NUM=$((LINK_NUM + 1))
+            fi
+          done < ../extracted_links.txt
+          
+          cd ..
+
+      - name: Send files to Bale bot with per-part failure reporting
+        id: send_files
+        run: |
+          TOKEN="${{ inputs.bale_token }}"
+          CHAT_ID="${{ inputs.bale_chat_id }}"
+          
+          cd downloaded_files
+          
+          SUCCESS_COUNT=0
+          FAIL_COUNT=0
+          FAILED_LINKS=""
+          
+          # Also read the original links to report them
+          mapfile -t ORIGINAL_LINKS < ../extracted_links.txt
+          LINK_INDEX=0
+          
+          for FILE in *; do
+            if [ -f "$FILE" ] && [ -s "$FILE" ]; then
+              SIZE=$(stat -c%s "$FILE")
+              SIZE_MB=$((SIZE / 1024 / 1024))
+              
+              RESPONSE=$(curl -s -w "%{http_code}" -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+                -F "chat_id=${CHAT_ID}" \
+                -F "document=@${FILE}" \
+                -F "caption=${FILE} | ${SIZE_MB} MB")
+              
+              if [ "$RESPONSE" = "200" ]; then
+                SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+              else
+                FAIL_COUNT=$((FAIL_COUNT + 1))
+                # Send individual failure message
+                curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+                  -d "chat_id=${CHAT_ID}" \
+                  -d "text=❌ Failed to send: ${FILE}%0AHTTP Code: ${RESPONSE}"
+                # Store the original link for later
+                if [ $LINK_INDEX -lt ${#ORIGINAL_LINKS[@]} ]; then
+                  FAILED_LINKS="${FAILED_LINKS}${ORIGINAL_LINKS[$LINK_INDEX]}%0A"
+                fi
+              fi
+              
+              LINK_INDEX=$((LINK_INDEX + 1))
+              sleep 1
+            fi
+          done
+          
+          cd ..
+          
+          echo "SUCCESS_COUNT=$SUCCESS_COUNT" >> $GITHUB_ENV
+          echo "FAIL_COUNT=$FAIL_COUNT" >> $GITHUB_ENV
+          echo "FAILED_LINKS=$FAILED_LINKS" >> $GITHUB_ENV
+          
+          # Send completion message
+          if [ "$FAIL_COUNT" -eq 0 ]; then
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+              -d "chat_id=${CHAT_ID}" \
+              -d "text=✅ VDS COMPLETE!%0A%0A📊 Summary:%0A- Links found: ${{ env.LINK_COUNT }}%0A- Files sent successfully: ${SUCCESS_COUNT}%0A- Files failed: ${FAIL_COUNT}"
+          else
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+              -d "chat_id=${CHAT_ID}" \
+              -d "text=⚠️ VDS PARTIALLY COMPLETE%0A%0A📊 Summary:%0A- Links found: ${{ env.LINK_COUNT }}%0A- Files sent successfully: ${SUCCESS_COUNT}%0A- Files failed: ${FAIL_COUNT}"
+          fi
+
+      - name: Send failed links separately
+        if: env.FAIL_COUNT > 0
+        run: |
+          TOKEN="${{ inputs.bale_token }}"
+          CHAT_ID="${{ inputs.bale_chat_id }}"
+          FAILED_LINKS="${{ env.FAILED_LINKS }}"
+          
+          if [ -n "$FAILED_LINKS" ]; then
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+              -d "chat_id=${CHAT_ID}" \
+              -d "text=❌ FAILED PARTS LINKS:%0A%0A${FAILED_LINKS}%0A%0AUse these links with the Resender workflow."
+          fi
+
+      - name: Cleanup
+        run: |
+          rm -f README.md extracted_links.txt
+          rm -rf downloaded_files
