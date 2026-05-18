@@ -12,7 +12,7 @@ on:
         required: false
         type: string
       part_numbers:
-        description: 'Part numbers, ranges, or "all" (e.g., 1-10 15 20-25 final, or "all" for all parts)'
+        description: 'Part numbers or ranges (e.g., 1-10 15 20-25 final). 1-10 includes parts 1 through 10.'
         required: false
         type: string
       bale_token:
@@ -76,6 +76,10 @@ jobs:
           elif [ -n "$BRANCH_NAME" ] && [ -n "$PART_NUMBERS" ]; then
             echo "Using branch_name: $BRANCH_NAME"
             
+            # Expand ranges in part_numbers
+            EXPANDED_PARTS=$(expand_ranges "$PART_NUMBERS")
+            echo "Expanded part numbers: $EXPANDED_PARTS"
+            
             # Fetch README.md from the branch
             REPO="${{ github.repository }}"
             README_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/README.md"
@@ -90,35 +94,17 @@ jobs:
             
             echo "✅ README.md fetched successfully"
             
-            # Check if "all" keyword is present
-            if [[ "$PART_NUMBERS" == *"all"* ]]; then
-              echo "Detected 'all' keyword. Finding all part numbers from README..."
-              # Extract all .zXX numbers from README (using grep -E)
-              ALL_PARTS=$(grep -oE '\.z[0-9]{2}' README.md | sed 's/\.z//' | sort -u | tr '\n' ' ')
-              # Also add final
-              ALL_PARTS="$ALL_PARTS final"
-              echo "Found parts: $ALL_PARTS"
-              PART_NUMBERS="$ALL_PARTS"
-            fi
-            
-            # Expand ranges in part_numbers
-            EXPANDED_PARTS=$(expand_ranges "$PART_NUMBERS")
-            echo "Expanded part numbers: $EXPANDED_PARTS"
-            
             # Extract links for each part number
             for PART_NUM in $EXPANDED_PARTS; do
               if [ "$PART_NUM" = "final" ] || [ "$PART_NUM" = "0" ]; then
-                # Extract .zip link - look for URL ending with .zip
-                LINK=$(grep -oE 'https://[^ )]+\.zip' README.md | head -1)
+                LINK=$(grep -oP '\]\(\Khttps://[^)]+\.zip' README.md | head -1)
                 if [ -n "$LINK" ]; then
                   echo "$LINK" >> extracted_links.txt
                   echo "Found link for final .zip"
                 fi
               else
-                # Format part number with leading zero (1 -> 01, 15 -> 15)
                 PART_NUM_PADDED=$(printf "%02d" $PART_NUM)
-                # Extract .zXX link
-                LINK=$(grep -oE 'https://[^ )]+\.z'"${PART_NUM_PADDED}" README.md | head -1)
+                LINK=$(grep -oP '\]\(\Khttps://[^)]+\.z'"${PART_NUM_PADDED}" README.md | head -1)
                 if [ -n "$LINK" ]; then
                   echo "$LINK" >> extracted_links.txt
                   echo "Found link for .z${PART_NUM_PADDED}"
