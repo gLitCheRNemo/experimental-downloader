@@ -1,4 +1,4 @@
-name: 5- VDS test
+name: 3- VDS
 
 on:
   workflow_dispatch:
