@@ -1,4 +1,4 @@
-name: 4- Branch Remover
+name: Branch Remover
 
 on:
   workflow_dispatch:
