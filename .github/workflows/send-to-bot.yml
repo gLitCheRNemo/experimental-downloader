@@ -93,7 +93,7 @@ jobs:
             # Check if "all" keyword is present
             if [[ "$PART_NUMBERS" == *"all"* ]]; then
               echo "Detected 'all' keyword. Finding all part numbers from README..."
-              # Extract all .zXX numbers from README (using grep -E which is always available)
+              # Extract all .zXX numbers from README
               ALL_PARTS=$(grep -oE '\.z[0-9]{2}' README.md | sed 's/\.z//' | sort -u | tr '\n' ' ')
               # Also add final
               ALL_PARTS="$ALL_PARTS final"
@@ -108,14 +108,16 @@ jobs:
             # Extract links for each part number
             for PART_NUM in $EXPANDED_PARTS; do
               if [ "$PART_NUM" = "final" ] || [ "$PART_NUM" = "0" ]; then
-                LINK=$(grep -oE '\]\(https://[^)]+\.zip' README.md | sed 's/\]\(//' | head -1)
+                # Extract .zip link - look for any URL ending with .zip
+                LINK=$(grep -oE 'https://[^ )]+\.zip' README.md | head -1)
                 if [ -n "$LINK" ]; then
                   echo "$LINK" >> extracted_links.txt
                   echo "Found link for final .zip"
                 fi
               else
                 PART_NUM_PADDED=$(printf "%02d" $PART_NUM)
-                LINK=$(grep -oE '\]\(https://[^)]+\.z'"${PART_NUM_PADDED}" README.md | sed 's/\]\(//' | head -1)
+                # Extract .zXX link
+                LINK=$(grep -oE 'https://[^ )]+\.z'"${PART_NUM_PADDED}" README.md | head -1)
                 if [ -n "$LINK" ]; then
                   echo "$LINK" >> extracted_links.txt
                   echo "Found link for .z${PART_NUM_PADDED}"
@@ -131,8 +133,8 @@ jobs:
             exit 1
           fi
           
-          # Clean up extracted links
-          sed -i 's/^[[:space:]]*//;s/[[:space:]]*$//' extracted_links.txt
+          # Remove any carriage returns and empty lines
+          sed -i 's/\r//g' extracted_links.txt
           sed -i '/^$/d' extracted_links.txt
           
           LINK_COUNT=$(wc -l < extracted_links.txt)
@@ -162,10 +164,8 @@ jobs:
               echo "$LINK"
               echo "=========================================="
               
-              # Download with wget (follow redirects, handle GitHub's raw URLs)
               wget --content-disposition --trust-server-names --max-redirect=5 "$LINK"
               
-              # Find the downloaded file
               DOWNLOADED_FILE=$(ls -1 | head -n 1)
               echo "Downloaded file: $DOWNLOADED_FILE"
               
@@ -195,7 +195,6 @@ jobs:
           CHAT_ID="${{ inputs.bale_chat_id }}"
           LINK_COUNT="${{ env.LINK_COUNT }}"
           
-          # Send header message
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
             -d "text=📦 Found ${LINK_COUNT} link(s). Downloading and sending..."
@@ -224,7 +223,6 @@ jobs:
           
           cd ..
           
-          # Send completion message
           SENT_COUNT=$((FILE_NUM - 1))
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
@@ -252,6 +250,6 @@ jobs:
 
       - name: Cleanup
         run: |
-          rm -f README.md download_status.txt extracted_links.txt input_text.txt
+          rm -f README.md download_status.txt extracted_links.txt
           rm -rf downloaded_files
           echo "🧹 Cleaned up temporary files"
