@@ -4,15 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       raw_links:
-        description: 'Raw GitHub links (one per line, or space-separated). If provided, branch_name and part_numbers are ignored.'
+        description: 'Raw GitHub links (one per line, or space-separated)'
         required: false
         type: string
       branch_name:
-        description: 'Branch name (e.g., videos). Used with part_numbers if raw_links is empty.'
+        description: 'Branch name (e.g., videos)'
         required: false
         type: string
       part_numbers:
-        description: 'Part numbers, ranges, or "all" (e.g., 1-10 15 20-25 final, or "all" for all parts)'
+        description: 'Part numbers, ranges, or "all" (e.g., 1-10 15 final)'
         required: false
         type: string
       bale_token:
@@ -33,110 +33,104 @@ jobs:
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
 
-      - name: Determine source and extract links
-        id: extract
+      - name: Create output file
         run: |
-          RAW_LINKS="${{ inputs.raw_links }}"
+          > extracted_links.txt
+          echo "LINK_COUNT=0" >> $GITHUB_ENV
+
+      - name: Process raw_links if provided
+        if: ${{ inputs.raw_links != '' }}
+        run: |
+          echo "Using raw_links input"
+          echo "${{ inputs.raw_links }}" | tr ' ' '\n' | grep -E 'https?://' >> extracted_links.txt
+          echo "SOURCE=raw_links" >> $GITHUB_ENV
+
+      - name: Process branch method if raw_links is empty
+        if: ${{ inputs.raw_links == '' && inputs.branch_name != '' && inputs.part_numbers != '' }}
+        run: |
           BRANCH_NAME="${{ inputs.branch_name }}"
           PART_NUMBERS="${{ inputs.part_numbers }}"
+          REPO="${{ github.repository }}"
           
-          > extracted_links.txt
+          echo "Using branch_name: $BRANCH_NAME"
+          echo "Part numbers: $PART_NUMBERS"
           
-          # Function to expand ranges like 1-10 into a list of numbers
-          expand_ranges() {
-            local input="$1"
-            local result=""
-            for token in $input; do
-              if [[ "$token" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-                start=${BASH_REMATCH[1]}
-                end=${BASH_REMATCH[2]}
-                if [ $start -le $end ]; then
-                  for ((i=start; i<=end; i++)); do
-                    result="$result $i"
-                  done
-                else
-                  for ((i=start; i>=end; i--)); do
-                    result="$result $i"
-                  done
-                fi
-              else
-                result="$result $token"
-              fi
-            done
-            echo "$result"
-          }
+          # Fetch README.md
+          README_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/README.md"
+          echo "Fetching README from: $README_URL"
           
-          # Case 1: raw_links is provided (use it directly)
-          if [ -n "$RAW_LINKS" ]; then
-            echo "Using raw_links input"
-            echo "$RAW_LINKS" | tr ' ' '\n' | grep -E 'https?://' >> extracted_links.txt
-            echo "SOURCE=raw_links" >> $GITHUB_ENV
+          curl --fail -L -o README.md "$README_URL"
           
-          # Case 2: branch_name and part_numbers are provided
-          elif [ -n "$BRANCH_NAME" ] && [ -n "$PART_NUMBERS" ]; then
-            echo "Using branch_name: $BRANCH_NAME"
-            
-            # Fetch README.md from the branch
-            REPO="${{ github.repository }}"
-            README_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/README.md"
-            echo "Fetching README from: $README_URL"
-            
-            curl -L -o README.md "$README_URL"
-            
-            if [ ! -f "README.md" ]; then
-              echo "❌ Could not fetch README.md from branch: $BRANCH_NAME"
-              exit 1
-            fi
-            
-            echo "✅ README.md fetched successfully"
-            
-            # Check if "all" keyword is present
-            if [[ "$PART_NUMBERS" == *"all"* ]]; then
-              echo "Detected 'all' keyword. Finding all part numbers from README..."
-              # Extract all .zXX numbers from README
-              ALL_PARTS=$(grep -oE '\.z[0-9]{2}' README.md | sed 's/\.z//' | sort -u | tr '\n' ' ')
-              # Also add final
-              ALL_PARTS="$ALL_PARTS final"
-              echo "Found parts: $ALL_PARTS"
-              PART_NUMBERS="$ALL_PARTS"
-            fi
-            
-            # Expand ranges in part_numbers
-            EXPANDED_PARTS=$(expand_ranges "$PART_NUMBERS")
-            echo "Expanded part numbers: $EXPANDED_PARTS"
-            
-            # Extract links for each part number
-            for PART_NUM in $EXPANDED_PARTS; do
-              if [ "$PART_NUM" = "final" ] || [ "$PART_NUM" = "0" ]; then
-                # Extract .zip link - look for any URL ending with .zip
-                LINK=$(grep -oE 'https://[^ )]+\.zip' README.md | head -1)
-                if [ -n "$LINK" ]; then
-                  echo "$LINK" >> extracted_links.txt
-                  echo "Found link for final .zip"
-                fi
-              else
-                PART_NUM_PADDED=$(printf "%02d" $PART_NUM)
-                # Extract .zXX link
-                LINK=$(grep -oE 'https://[^ )]+\.z'"${PART_NUM_PADDED}" README.md | head -1)
-                if [ -n "$LINK" ]; then
-                  echo "$LINK" >> extracted_links.txt
-                  echo "Found link for .z${PART_NUM_PADDED}"
-                fi
-              fi
-            done
-            echo "SOURCE=branch" >> $GITHUB_ENV
-          
-          else
-            echo "❌ No input provided. Please provide either:"
-            echo "  - raw_links (direct links), or"
-            echo "  - branch_name + part_numbers (to fetch from README.md)"
+          if [ ! -f "README.md" ]; then
+            echo "ERROR: Could not fetch README.md"
             exit 1
           fi
           
-          # Remove any carriage returns and empty lines
-          sed -i 's/\r//g' extracted_links.txt
-          sed -i '/^$/d' extracted_links.txt
+          echo "README.md contents:"
+          cat README.md
           
+          # Handle "all" keyword
+          if echo "$PART_NUMBERS" | grep -q "all"; then
+            echo "Detected 'all' keyword"
+            # Extract all .zxx numbers
+            ALL_PARTS=$(grep -o '\.z[0-9][0-9]' README.md | sed 's/\.z//' | sort -u | tr '\n' ' ')
+            PART_NUMBERS="$ALL_PARTS final"
+            echo "Expanded to: $PART_NUMBERS"
+          fi
+          
+          # Process each part number
+          for PART in $PART_NUMBERS; do
+            if [ "$PART" = "final" ] || [ "$PART" = "0" ]; then
+              # Find .zip link
+              LINK=$(grep -o 'https://[^ )]*\.zip' README.md | head -1)
+              if [ -n "$LINK" ]; then
+                echo "$LINK" >> extracted_links.txt
+                echo "Found .zip link"
+              fi
+            elif [[ "$PART" =~ ^[0-9]+$ ]]; then
+              # Format number with leading zero
+              PADDED=$(printf "%02d" $PART)
+              LINK=$(grep -o "https://[^ )]*\.z${PADDED}" README.md | head -1)
+              if [ -n "$LINK" ]; then
+                echo "$LINK" >> extracted_links.txt
+                echo "Found .z${PADDED} link"
+              fi
+            elif [[ "$PART" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+              # Handle range like 1-10
+              START=${BASH_REMATCH[1]}
+              END=${BASH_REMATCH[2]}
+              if [ $START -le $END ]; then
+                for ((i=START; i<=END; i++)); do
+                  PADDED=$(printf "%02d" $i)
+                  LINK=$(grep -o "https://[^ )]*\.z${PADDED}" README.md | head -1)
+                  if [ -n "$LINK" ]; then
+                    echo "$LINK" >> extracted_links.txt
+                  fi
+                done
+              else
+                for ((i=START; i>=END; i--)); do
+                  PADDED=$(printf "%02d" $i)
+                  LINK=$(grep -o "https://[^ )]*\.z${PADDED}" README.md | head -1)
+                  if [ -n "$LINK" ]; then
+                    echo "$LINK" >> extracted_links.txt
+                  fi
+                done
+              fi
+            fi
+          done
+          
+          echo "SOURCE=branch" >> $GITHUB_ENV
+
+      - name: Check if branch method failed due to missing inputs
+        if: ${{ inputs.raw_links == '' && (inputs.branch_name == '' || inputs.part_numbers == '') }}
+        run: |
+          echo "ERROR: Please provide either:"
+          echo "  - raw_links, OR"
+          echo "  - branch_name AND part_numbers"
+          exit 1
+
+      - name: Count and validate links
+        run: |
           LINK_COUNT=$(wc -l < extracted_links.txt)
           echo "LINK_COUNT=$LINK_COUNT" >> $GITHUB_ENV
           
@@ -147,7 +141,7 @@ jobs:
           echo "=========================================="
           
           if [ "$LINK_COUNT" -eq 0 ]; then
-            echo "❌ No links found to process"
+            echo "ERROR: No links found to process"
             exit 1
           fi
 
@@ -159,24 +153,19 @@ jobs:
           LINK_NUM=1
           while IFS= read -r LINK; do
             if [ -n "$LINK" ]; then
-              echo "=========================================="
-              echo "Downloading file $LINK_NUM of ${{ env.LINK_COUNT }} from:"
-              echo "$LINK"
-              echo "=========================================="
+              echo "Downloading file $LINK_NUM of ${{ env.LINK_COUNT }}: $LINK"
               
               wget --content-disposition --trust-server-names --max-redirect=5 "$LINK"
               
               DOWNLOADED_FILE=$(ls -1 | head -n 1)
-              echo "Downloaded file: $DOWNLOADED_FILE"
+              echo "Downloaded: $DOWNLOADED_FILE"
               
               if [ -f "$DOWNLOADED_FILE" ] && [ -s "$DOWNLOADED_FILE" ]; then
                 SIZE=$(stat -c%s "$DOWNLOADED_FILE")
                 SIZE_MB=$((SIZE / 1024 / 1024))
                 echo "✅ Downloaded: $DOWNLOADED_FILE (${SIZE_MB} MB)"
-                echo "$DOWNLOADED_FILE:SUCCESS:$SIZE" >> ../download_status.txt
               else
-                echo "❌ Failed to download from: $LINK"
-                echo "unknown:FAILED:0" >> ../download_status.txt
+                echo "❌ Failed to download: $LINK"
               fi
               
               LINK_NUM=$((LINK_NUM + 1))
@@ -185,9 +174,6 @@ jobs:
           done < ../extracted_links.txt
           
           cd ..
-          
-          echo "Files in downloaded_files directory:"
-          ls -lh downloaded_files/
 
       - name: Send files to Bale bot
         run: |
@@ -197,7 +183,7 @@ jobs:
           
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            -d "text=📦 Found ${LINK_COUNT} link(s). Downloading and sending..."
+            -d "text=📦 Found ${LINK_COUNT} link(s). Sending files..."
           
           cd downloaded_files
           
@@ -207,7 +193,7 @@ jobs:
               SIZE=$(stat -c%s "$FILE")
               SIZE_MB=$((SIZE / 1024 / 1024))
               
-              echo "Sending file $FILE_NUM: $FILE (${SIZE_MB} MB)"
+              echo "Sending: $FILE (${SIZE_MB} MB)"
               
               curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
                 -F "chat_id=${CHAT_ID}" \
@@ -226,30 +212,9 @@ jobs:
           SENT_COUNT=$((FILE_NUM - 1))
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            -d "text=✅ Done! Sent ${SENT_COUNT} file(s) from ${LINK_COUNT} link(s)."
-
-      - name: Show summary
-        run: |
-          echo "## 📊 Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Source | ${{ env.SOURCE }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Links found | ${{ env.LINK_COUNT }} |" >> $GITHUB_STEP_SUMMARY
-          if [ -f "download_status.txt" ]; then
-            SUCCESS_COUNT=$(grep -c ":SUCCESS:" download_status.txt || echo "0")
-            FAILED_COUNT=$(grep -c ":FAILED:" download_status.txt || echo "0")
-            echo "| Successfully downloaded | $SUCCESS_COUNT |" >> $GITHUB_STEP_SUMMARY
-            echo "| Failed downloads | $FAILED_COUNT |" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Processed links:" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat extracted_links.txt >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+            -d "text=✅ Done! Sent ${SENT_COUNT} file(s)."
 
       - name: Cleanup
         run: |
-          rm -f README.md download_status.txt extracted_links.txt
+          rm -f README.md extracted_links.txt
           rm -rf downloaded_files
-          echo "🧹 Cleaned up temporary files"
