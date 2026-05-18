@@ -1,4 +1,4 @@
-name: 1- Video Downloader V2 + Send To Bot
+name: 5- VDS test
 
 on:
   workflow_dispatch:
