@@ -15,11 +15,6 @@ on:
         description: Bale Chat ID
         required: true
         type: string
-      upload_delay:
-        description: Delay between uploads (seconds)
-        required: false
-        type: string
-        default: '2'
 
 jobs:
   resend:
@@ -101,103 +96,44 @@ jobs:
           ls -lh downloaded_files/
           echo "=========================================="
 
-      - name: Send files to Bale bot (with retry)
+      - name: Send files to Bale bot
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
-          UPLOAD_DELAY="${{ inputs.upload_delay }}"
-          
-          # Validate delay is a number
-          if ! [[ "$UPLOAD_DELAY" =~ ^[0-9]+$ ]]; then
-            echo "Invalid delay value. Using default 2 seconds."
-            UPLOAD_DELAY=2
-          fi
-          
-          # Retry function for sending files
-          send_with_retry() {
-            local FILE_PATH="$1"
-            local FILE_NAME="$2"
-            local FILE_SIZE_MB="$3"
-            local MAX_RETRIES=3
-            local ATTEMPT=1
-            
-            while [ $ATTEMPT -le $MAX_RETRIES ]; do
-              echo "  Attempt $ATTEMPT of $MAX_RETRIES..."
-              
-              RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
-                -F "chat_id=${CHAT_ID}" \
-                -F "document=@${FILE_PATH}" \
-                -F "caption=${FILE_NAME} | ${FILE_SIZE_MB} MB")
-              
-              HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-              
-              if [ "$HTTP_CODE" -eq 200 ]; then
-                echo "  ✅ Sent successfully on attempt $ATTEMPT"
-                return 0
-              else
-                echo "  ❌ Failed with HTTP $HTTP_CODE (attempt $ATTEMPT)"
-                if [ $ATTEMPT -lt $MAX_RETRIES ]; then
-                  SLEEP_TIME=$((2 ** ATTEMPT))
-                  echo "  ⏳ Retrying in $SLEEP_TIME seconds..."
-                  sleep $SLEEP_TIME
-                fi
-              fi
-              
-              ATTEMPT=$((ATTEMPT + 1))
-            done
-            
-            echo "  ❌ Failed after $MAX_RETRIES attempts"
-            return 1
-          }
           
           # Send header message
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            -d "text=📦 Sending requested files... (Delay: ${UPLOAD_DELAY}s between files)"
+            -d "text=📦 Sending requested files..."
           
           cd downloaded_files
           
           FILE_NUM=1
-          FAILED_FILES=""
-          TOTAL_FILES=$(ls -1 | wc -l)
-          
           for FILE in *; do
             if [ -f "$FILE" ] && [ -s "$FILE" ]; then
               SIZE=$(stat -c%s "$FILE")
               SIZE_MB=$((SIZE / 1024 / 1024))
               
-              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-              echo "📤 Sending file $FILE_NUM of $TOTAL_FILES: $FILE (${SIZE_MB} MB)"
-              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo "Sending file $FILE_NUM: $FILE (${SIZE_MB} MB)"
               
-              if send_with_retry "$FILE" "$FILE" "$SIZE_MB"; then
-                echo "✅ Sent $FILE"
-              else
-                echo "❌ Failed to send $FILE after retries"
-                FAILED_FILES="$FAILED_FILES $FILE"
-              fi
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+                -F "chat_id=${CHAT_ID}" \
+                -F "document=@${FILE}" \
+                -F "caption=${FILE} | ${SIZE_MB} MB"
+              
+              echo "✅ Sent $FILE"
               
               FILE_NUM=$((FILE_NUM + 1))
-              
-              if [ $FILE_NUM -le $TOTAL_FILES ]; then
-                echo "⏳ Waiting $UPLOAD_DELAY seconds before next file..."
-                sleep $UPLOAD_DELAY
-              fi
+              sleep 1
             fi
           done
           
           cd ..
           
           # Send completion message
-          if [ -z "$FAILED_FILES" ]; then
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-              -d "chat_id=${CHAT_ID}" \
-              -d "text=✅ Done sending all requested files. Total: $TOTAL_FILES files"
-          else
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-              -d "chat_id=${CHAT_ID}" \
-              -d "text=⚠️ Done sending. Failed files:${FAILED_FILES}"
-          fi
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=✅ Done sending all requested files."
 
       - name: Cleanup
         run: |
