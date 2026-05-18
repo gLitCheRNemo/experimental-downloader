@@ -1,10 +1,10 @@
-name: 5- Send To Bot V2
+name: 5- Send To Bot
 
 on:
   workflow_dispatch:
     inputs:
       raw_links:
-        description: Raw GitHub links (one per line, or space-separated)
+        description: 'Paste any text containing GitHub raw links (e.g., from a README.md or web page). The workflow will automatically find all https://raw.githubusercontent.com/ links.'
         required: true
         type: string
       bale_token:
@@ -25,86 +25,92 @@ jobs:
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
 
-      - name: Download files in parallel (5 at a time)
+      - name: Extract links from input text
+        id: extract
+        run: |
+          # Save the input text to a file
+          echo "${{ inputs.raw_links }}" > input_text.txt
+          
+          # Extract all raw.githubusercontent.com links
+          grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' input_text.txt | sort -u > extracted_links.txt
+          
+          # Also match links that might have quotes around them
+          grep -oE '"https://raw\.githubusercontent\.com/[^"]+"' input_text.txt | sed 's/"//g' >> extracted_links.txt
+          
+          # Also match links in markdown format [text](url)
+          grep -oE '\]\(https://raw\.githubusercontent\.com/[^)]+\)' input_text.txt | sed 's/\]\(//;s/\)//' >> extracted_links.txt
+          
+          # Sort and deduplicate
+          sort -u extracted_links.txt -o extracted_links.txt
+          
+          # Count links
+          LINK_COUNT=$(wc -l < extracted_links.txt)
+          echo "LINK_COUNT=$LINK_COUNT" >> $GITHUB_ENV
+          
+          echo "=========================================="
+          echo "Found $LINK_COUNT links in the text:"
+          echo "=========================================="
+          cat extracted_links.txt
+          echo "=========================================="
+
+      - name: Check if links were found
+        if: env.LINK_COUNT == 0
+        run: |
+          echo "❌ No raw.githubusercontent.com links found in the provided text."
+          echo "Please make sure your text contains links like:"
+          echo "  https://raw.githubusercontent.com/username/repo/branch/filename.zip"
+          exit 1
+
+      - name: Download files using wget
         run: |
           mkdir -p downloaded_files
           cd downloaded_files
           
-          # Convert multiline input to array
-          LINKS_ARRAY=()
-          while IFS= read -r line; do
-            [ -n "$line" ] && LINKS_ARRAY+=("$line")
-          done <<< "${{ inputs.raw_links }}"
-          
-          TOTAL_LINKS=${#LINKS_ARRAY[@]}
-          echo "Total links to download: $TOTAL_LINKS"
-          
-          # Function to download a single file
-          download_file() {
-            local LINK="$1"
-            local INDEX="$2"
-            echo "[$INDEX] Downloading from: $LINK"
-            
-            # Download with wget
-            wget --content-disposition --trust-server-names --timeout=30 --tries=3 "$LINK" 2>&1
-            
-            # Find the downloaded file
-            DOWNLOADED_FILE=$(ls -t | head -1)
-            
-            if [ -f "$DOWNLOADED_FILE" ] && [ -s "$DOWNLOADED_FILE" ]; then
-              SIZE=$(stat -c%s "$DOWNLOADED_FILE")
-              SIZE_MB=$((SIZE / 1024 / 1024))
-              echo "[$INDEX] ✅ Downloaded: $DOWNLOADED_FILE (${SIZE_MB} MB)"
-              echo "$DOWNLOADED_FILE:SUCCESS:$SIZE" >> ../download_status.txt
-            else
-              echo "[$INDEX] ❌ Failed to download from: $LINK"
-              echo "unknown:FAILED:0" >> ../download_status.txt
+          LINK_NUM=1
+          while IFS= read -r LINK; do
+            if [ -n "$LINK" ]; then
+              echo "=========================================="
+              echo "Downloading file $LINK_NUM of ${{ env.LINK_COUNT }} from:"
+              echo "$LINK"
+              echo "=========================================="
+              
+              # Download with wget
+              wget --content-disposition --trust-server-names "$LINK"
+              
+              # Find the downloaded file
+              DOWNLOADED_FILE=$(ls -1 | head -n 1)
+              echo "Downloaded file: $DOWNLOADED_FILE"
+              
+              if [ -f "$DOWNLOADED_FILE" ] && [ -s "$DOWNLOADED_FILE" ]; then
+                SIZE=$(stat -c%s "$DOWNLOADED_FILE")
+                SIZE_MB=$((SIZE / 1024 / 1024))
+                echo "✅ Downloaded: $DOWNLOADED_FILE (${SIZE_MB} MB)"
+                echo "$DOWNLOADED_FILE:SUCCESS:$SIZE" >> ../download_status.txt
+              else
+                echo "❌ Failed to download from: $LINK"
+                echo "unknown:FAILED:0" >> ../download_status.txt
+              fi
+              
+              LINK_NUM=$((LINK_NUM + 1))
+              echo ""
             fi
-          }
-          
-          export -f download_file
-          
-          # Process links in batches of 5
-          BATCH_SIZE=5
-          for ((i=0; i<TOTAL_LINKS; i+=BATCH_SIZE)); do
-            BATCH_END=$((i + BATCH_SIZE))
-            BATCH_LINKS=("${LINKS_ARRAY[@]:i:BATCH_SIZE}")
-            
-            echo ""
-            echo "=========================================="
-            echo "Downloading batch $((i/BATCH_SIZE + 1)) (${#BATCH_LINKS[@]} files)"
-            echo "=========================================="
-            
-            # Run downloads in parallel for this batch
-            for ((j=0; j<${#BATCH_LINKS[@]}; j++)); do
-              INDEX=$((i + j + 1))
-              download_file "${BATCH_LINKS[$j]}" "$INDEX" &
-            done
-            
-            # Wait for all downloads in this batch to complete
-            wait
-            
-            echo "Batch $((i/BATCH_SIZE + 1)) completed"
-            sleep 1
-          done
+          done < ../extracted_links.txt
           
           cd ..
           
-          echo ""
-          echo "=========================================="
-          echo "All downloads completed. Files in directory:"
+          echo "Files in downloaded_files directory:"
           ls -lh downloaded_files/
-          echo "=========================================="
 
       - name: Send files to Bale bot
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
+          LINK_COUNT="${{ env.LINK_COUNT }}"
           
-          # Send header message
+          # Send header message with count
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            -d "text=📦 Sending requested files..."
+            -d "text=📦 Found ${LINK_COUNT} link(s) in text. Downloading and sending..."
           
           cd downloaded_files
           
@@ -131,12 +137,32 @@ jobs:
           cd ..
           
           # Send completion message
+          SENT_COUNT=$((FILE_NUM - 1))
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            -d "text=✅ Done sending all requested files."
+            -d "text=✅ Done! Sent ${SENT_COUNT} file(s) from ${LINK_COUNT} link(s)."
+
+      - name: Show summary
+        run: |
+          echo "## 📊 Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Links found | ${{ env.LINK_COUNT }} |" >> $GITHUB_STEP_SUMMARY
+          if [ -f "download_status.txt" ]; then
+            SUCCESS_COUNT=$(grep -c ":SUCCESS:" download_status.txt || echo "0")
+            FAILED_COUNT=$(grep -c ":FAILED:" download_status.txt || echo "0")
+            echo "| Successfully downloaded | $SUCCESS_COUNT |" >> $GITHUB_STEP_SUMMARY
+            echo "| Failed downloads | $FAILED_COUNT |" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Extracted links:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat extracted_links.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Cleanup
         run: |
-          rm -f download_status.txt
+          rm -f download_status.txt extracted_links.txt input_text.txt
           rm -rf downloaded_files
           echo "🧹 Cleaned up temporary files"
