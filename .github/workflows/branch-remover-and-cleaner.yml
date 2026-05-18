@@ -1,0 +1,199 @@
+name: 3- Branch Remover + Cleaner
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: 'Enter the exact name of the branch to delete'
+        required: true
+        type: string
+      confirm_deletion:
+        description: 'Type "DELETE" to confirm you want to remove this branch'
+        required: true
+        type: string
+      clear_hidden_storage:
+        description: '🧹 Clear hidden storage (remove large files from Git history)'
+        required: true
+        default: false
+        type: boolean
+      size_limit:
+        description: '📏 Size limit in MB (files larger than this will be removed from history) - Only used if Clear Hidden Storage is ON'
+        required: false
+        default: '10'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  # ============================================
+  # JOB 1: Delete the branch
+  # ============================================
+  delete-branch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate branch name
+        id: validate
+        run: |
+          BRANCH_TO_DELETE="${{ github.event.inputs.branch_name }}"
+          CONFIRM="${{ github.event.inputs.confirm_deletion }}"
+          
+          echo "========================================"
+          echo "🔍 Validating deletion request"
+          echo "========================================"
+          echo "Requested branch: $BRANCH_TO_DELETE"
+          echo ""
+          
+          # SAFETY CHECK 1: Refuse to delete main/master branch
+          if [ "$BRANCH_TO_DELETE" = "main" ] || [ "$BRANCH_TO_DELETE" = "master" ]; then
+            echo "❌ ERROR: Cannot delete the default branch '$BRANCH_TO_DELETE'"
+            echo "   This safety rule protects your repository from accidental deletion."
+            exit 1
+          fi
+          
+          # SAFETY CHECK 2: Verify confirmation text
+          if [ "$CONFIRM" != "DELETE" ]; then
+            echo "❌ ERROR: Confirmation text does not match."
+            echo "   Please type exactly 'DELETE' in the confirmation field."
+            exit 1
+          fi
+          
+          # SAFETY CHECK 3: Verify the branch actually exists
+          git fetch origin
+          if ! git ls-remote --exit-code --heads origin "$BRANCH_TO_DELETE" > /dev/null 2>&1; then
+            echo "❌ ERROR: Branch '$BRANCH_TO_DELETE' does not exist in this repository."
+            echo "   No action taken."
+            exit 1
+          fi
+          
+          echo "✅ All validation checks passed!"
+          echo "branch_name=$BRANCH_TO_DELETE" >> $GITHUB_OUTPUT
+
+      - name: Delete the branch
+        if: success() && steps.validate.outputs.branch_name != ''
+        uses: dawidd6/action-delete-branch@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          branches: ${{ steps.validate.outputs.branch_name }}
+
+      - name: Branch deletion success message
+        if: success()
+        run: |
+          echo "========================================"
+          echo "✅ Branch '${{ steps.validate.outputs.branch_name }}' has been deleted successfully!"
+          echo "========================================"
+          echo ""
+          echo "The branch and all its files are no longer accessible."
+          echo "Raw file links (raw.githubusercontent.com) will now return 404 errors."
+
+      - name: Branch deletion failure message (if validation failed)
+        if: failure()
+        run: |
+          echo "========================================"
+          echo "❌ Branch deletion failed"
+          echo "========================================"
+          echo ""
+          echo "Possible reasons:"
+          echo "  - You tried to delete 'main' or 'master' (not allowed)"
+          echo "  - The branch name you entered does not exist"
+          echo "  - You didn't type 'DELETE' in the confirmation field"
+          echo ""
+          echo "No changes were made to your repository."
+
+  # ============================================
+  # JOB 2: Clear hidden storage (only if toggle is ON)
+  # ============================================
+  check-status:
+    name: 📊 Check Repository Status
+    needs: delete-branch
+    if: github.event.inputs.clear_hidden_storage == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Fetch full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 📊 Show repository status summary
+        run: |
+          SIZE_LIMIT="${{ github.event.inputs.size_limit }}"
+          SIZE_LIMIT_BYTES=$((SIZE_LIMIT * 1024 * 1024))
+          
+          echo "## 📊 Repository Status Before Cleaning" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⚙️ Settings" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Size limit | ${SIZE_LIMIT} MB |" >> $GITHUB_STEP_SUMMARY
+          echo "| Files larger than ${SIZE_LIMIT}MB will be removed | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### 📦 Repository Size" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| .git folder | $(du -sh .git | cut -f1) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Objects | $(du -sh .git/objects | cut -f1) |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### 🔢 Number of Commits" >> $GITHUB_STEP_SUMMARY
+          echo "**$(git rev-list --count HEAD)** commits" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### 📁 Files larger than ${SIZE_LIMIT}MB in history" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          git rev-list --objects --all | \
+            git cat-file --batch-check='%(objecttype) %(objectname) %(objectsize) %(rest)' | \
+            sed -n 's/^blob //p' | \
+            awk -v LIMIT=$SIZE_LIMIT_BYTES '$2 >= LIMIT { print $3, int($2/1048576) "MB" }' | \
+            sort -k2 -rn | head -20 >> $GITHUB_STEP_SUMMARY || echo "No files found ✅" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  clean-history:
+    name: 🗑️ Clean Repository History
+    needs: check-status
+    if: github.event.inputs.clear_hidden_storage == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Fetch full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: ⚙️ Install git-filter-repo
+        run: pip install git-filter-repo
+
+      - name: 🧹 Remove files larger than selected size from history
+        run: |
+          SIZE_LIMIT="${{ github.event.inputs.size_limit }}"
+          echo "Removing files larger than ${SIZE_LIMIT}MB from history..."
+          git filter-repo --strip-blobs-bigger-than ${SIZE_LIMIT}M --force
+
+      - name: 🚀 Push changes to repository
+        run: |
+          git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          git push --force --all
+          git push --force --tags
+
+      - name: ✅ Show final result
+        run: |
+          echo "## ✅ Cleaning completed successfully!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⚙️ Settings used" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Size limit | ${{ github.event.inputs.size_limit }} MB |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📏 New repository size" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| .git folder | $(du -sh .git | cut -f1) |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🎉 All files larger than ${{ github.event.inputs.size_limit }}MB have been removed from history!" >> $GITHUB_STEP_SUMMARY
