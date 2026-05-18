@@ -1,4 +1,4 @@
-name: 3- VDS
+name: 1- VDS
 
 on:
   workflow_dispatch:
