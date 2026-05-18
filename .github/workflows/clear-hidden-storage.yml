@@ -1,4 +1,4 @@
-name: 5- Repository Cleaner
+name: Repository Cleaner
 
 on:
   workflow_dispatch:
