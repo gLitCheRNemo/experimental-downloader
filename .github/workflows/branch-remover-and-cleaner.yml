@@ -3,21 +3,16 @@ name: 3- Branch Remover + Cleaner
 on:
   workflow_dispatch:
     inputs:
-      branch_name:
-        description: 'Enter the exact name of the branch to delete'
+      branch_names:
+        description: 'Branch names to delete (space-separated, e.g., videos md-parts wget)'
         required: true
         type: string
       confirm_deletion:
-        description: 'Type "DELETE" to confirm you want to remove this branch'
+        description: 'Type "DELETE" to confirm you want to remove these branches'
         required: true
         type: string
-      clear_hidden_storage:
-        description: '🧹 Clear hidden storage (remove large files from Git history)'
-        required: true
-        default: false
-        type: boolean
       size_limit:
-        description: '📏 Size limit in MB (files larger than this will be removed from history) - Only used if Clear Hidden Storage is ON'
+        description: '📏 Size limit in MB (files larger than this will be removed from history)'
         required: false
         default: '10'
         type: string
@@ -27,9 +22,9 @@ permissions:
 
 jobs:
   # ============================================
-  # JOB 1: Delete the branch
+  # JOB 1: Delete multiple branches
   # ============================================
-  delete-branch:
+  delete-branches:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -39,81 +34,118 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Validate branch name
+      - name: Validate and delete branches
         id: validate
         run: |
-          BRANCH_TO_DELETE="${{ github.event.inputs.branch_name }}"
+          BRANCHES_INPUT="${{ github.event.inputs.branch_names }}"
           CONFIRM="${{ github.event.inputs.confirm_deletion }}"
           
           echo "========================================"
           echo "🔍 Validating deletion request"
           echo "========================================"
-          echo "Requested branch: $BRANCH_TO_DELETE"
+          echo "Requested branches: $BRANCHES_INPUT"
           echo ""
           
-          # SAFETY CHECK 1: Refuse to delete main/master branch
-          if [ "$BRANCH_TO_DELETE" = "main" ] || [ "$BRANCH_TO_DELETE" = "master" ]; then
-            echo "❌ ERROR: Cannot delete the default branch '$BRANCH_TO_DELETE'"
-            echo "   This safety rule protects your repository from accidental deletion."
-            exit 1
-          fi
-          
-          # SAFETY CHECK 2: Verify confirmation text
+          # SAFETY CHECK 1: Verify confirmation text
           if [ "$CONFIRM" != "DELETE" ]; then
             echo "❌ ERROR: Confirmation text does not match."
             echo "   Please type exactly 'DELETE' in the confirmation field."
             exit 1
           fi
           
-          # SAFETY CHECK 3: Verify the branch actually exists
+          # Convert space-separated input to array
+          BRANCHES=($BRANCHES_INPUT)
+          VALID_BRANCHES=""
+          FAILED_BRANCHES=""
+          
           git fetch origin
-          if ! git ls-remote --exit-code --heads origin "$BRANCH_TO_DELETE" > /dev/null 2>&1; then
-            echo "❌ ERROR: Branch '$BRANCH_TO_DELETE' does not exist in this repository."
-            echo "   No action taken."
+          
+          for BRANCH in "${BRANCHES[@]}"; do
+            echo ""
+            echo "Checking branch: $BRANCH"
+            
+            # SAFETY CHECK 2: Refuse to delete main/master branch
+            if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
+              echo "  ❌ ERROR: Cannot delete the default branch '$BRANCH'"
+              FAILED_BRANCHES="$FAILED_BRANCHES $BRANCH"
+              continue
+            fi
+            
+            # SAFETY CHECK 3: Verify the branch actually exists
+            if git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null 2>&1; then
+              echo "  ✅ Branch '$BRANCH' exists and can be deleted"
+              VALID_BRANCHES="$VALID_BRANCHES $BRANCH"
+            else
+              echo "  ❌ Branch '$BRANCH' does not exist"
+              FAILED_BRANCHES="$FAILED_BRANCHES $BRANCH"
+            fi
+          done
+          
+          echo ""
+          echo "========================================"
+          echo "Validation summary:"
+          echo "========================================"
+          echo "Valid branches to delete:${VALID_BRANCHES:- none}"
+          echo "Failed branches (skipped):${FAILED_BRANCHES:- none}"
+          echo ""
+          
+          if [ -z "$VALID_BRANCHES" ]; then
+            echo "❌ No valid branches to delete. Exiting."
             exit 1
           fi
           
-          echo "✅ All validation checks passed!"
-          echo "branch_name=$BRANCH_TO_DELETE" >> $GITHUB_OUTPUT
+          echo "VALID_BRANCHES=$VALID_BRANCHES" >> $GITHUB_OUTPUT
 
-      - name: Delete the branch
-        if: success() && steps.validate.outputs.branch_name != ''
-        uses: dawidd6/action-delete-branch@v3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          branches: ${{ steps.validate.outputs.branch_name }}
+      - name: Delete each valid branch
+        if: success() && steps.validate.outputs.VALID_BRANCHES != ''
+        run: |
+          BRANCHES="${{ steps.validate.outputs.VALID_BRANCHES }}"
+          
+          for BRANCH in $BRANCHES; do
+            echo "========================================"
+            echo "Deleting branch: $BRANCH"
+            echo "========================================"
+            
+            git push origin --delete "$BRANCH"
+            
+            if [ $? -eq 0 ]; then
+              echo "✅ Branch '$BRANCH' deleted successfully"
+            else
+              echo "❌ Failed to delete branch '$BRANCH'"
+            fi
+            echo ""
+          done
 
-      - name: Branch deletion success message
+      - name: Success message
         if: success()
         run: |
           echo "========================================"
-          echo "✅ Branch '${{ steps.validate.outputs.branch_name }}' has been deleted successfully!"
+          echo "✅ Branch deletion completed!"
           echo "========================================"
           echo ""
-          echo "The branch and all its files are no longer accessible."
-          echo "Raw file links (raw.githubusercontent.com) will now return 404 errors."
+          echo "The following branches were deleted: ${{ steps.validate.outputs.VALID_BRANCHES }}"
+          echo ""
+          echo "Raw file links (raw.githubusercontent.com) will now return 404 errors for these branches."
 
-      - name: Branch deletion failure message (if validation failed)
-        if: failure()
+      - name: Failure message (if validation failed)
+        if: failure() && steps.validate.outcome == 'failure'
         run: |
           echo "========================================"
           echo "❌ Branch deletion failed"
           echo "========================================"
           echo ""
           echo "Possible reasons:"
-          echo "  - You tried to delete 'main' or 'master' (not allowed)"
-          echo "  - The branch name you entered does not exist"
           echo "  - You didn't type 'DELETE' in the confirmation field"
+          echo "  - No valid branches were found to delete"
           echo ""
           echo "No changes were made to your repository."
 
   # ============================================
-  # JOB 2: Clear hidden storage (only if toggle is ON)
+  # JOB 2: Clear hidden storage (always runs)
   # ============================================
   check-status:
     name: 📊 Check Repository Status
-    needs: delete-branch
-    if: github.event.inputs.clear_hidden_storage == 'true'
+    needs: delete-branches
     runs-on: ubuntu-latest
     steps:
       - name: 📥 Fetch full history
@@ -158,7 +190,6 @@ jobs:
   clean-history:
     name: 🗑️ Clean Repository History
     needs: check-status
-    if: github.event.inputs.clear_hidden_storage == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: 📥 Fetch full history
