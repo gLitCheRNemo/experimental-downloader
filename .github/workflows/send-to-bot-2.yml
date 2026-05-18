@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       raw_links:
-        description: 'Paste any text containing GitHub raw links (e.g., from a README.md or web page). The workflow will automatically find all https://raw.githubusercontent.com/ links.'
+        description: 'Paste any text containing GitHub raw links (e.g., from a README.md or web page). The workflow will automatically find all https://raw.githubusercontent.com/ links even if they have brackets, parentheses, or quotes around them.'
         required: true
         type: string
       bale_token:
@@ -25,23 +25,40 @@ jobs:
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
 
-      - name: Extract links from input text
+      - name: Extract links from input text (handles brackets, parentheses, quotes)
         id: extract
         run: |
           # Save the input text to a file
           echo "${{ inputs.raw_links }}" > input_text.txt
           
-          # Extract all raw.githubusercontent.com links
-          grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' input_text.txt | sort -u > extracted_links.txt
+          # Extract all raw.githubusercontent.com links using a robust pattern
+          # This pattern matches the URL even if it has characters before or after
+          grep -oE 'https://raw\.githubusercontent\.com/[a-zA-Z0-9._/-]+/[a-zA-Z0-9._/-]+/[a-zA-Z0-9._/-]+\.(zip|z[0-9]+|part[0-9]+|mp4|jpg|png|txt|md|html|csv|json|xml|pdf|rar|7z|tar|gz)' input_text.txt > extracted_links_raw.txt
           
-          # Also match links that might have quotes around them
-          grep -oE '"https://raw\.githubusercontent\.com/[^"]+"' input_text.txt | sed 's/"//g' >> extracted_links.txt
+          # Also match URLs that might have query parameters
+          grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' input_text.txt | grep -v '^$' >> extracted_links_raw.txt
           
-          # Also match links in markdown format [text](url)
-          grep -oE '\]\(https://raw\.githubusercontent\.com/[^)]+\)' input_text.txt | sed 's/\]\(//;s/\)//' >> extracted_links.txt
+          # Extract URLs that are inside markdown links: [text](url)
+          grep -oP '\]\(\Khttps://raw\.githubusercontent\.com/[^)]+' input_text.txt >> extracted_links_raw.txt 2>/dev/null || true
+          
+          # Extract URLs that are inside HTML href="url"
+          grep -oP 'href="\Khttps://raw\.githubusercontent\.com/[^"]+' input_text.txt >> extracted_links_raw.txt 2>/dev/null || true
+          
+          # Extract URLs that are inside brackets [url]
+          grep -oP '\[\Khttps://raw\.githubusercontent\.com/[^\]]+' input_text.txt >> extracted_links_raw.txt 2>/dev/null || true
+          
+          # Extract URLs that are inside parentheses (url)
+          grep -oP '\(\Khttps://raw\.githubusercontent\.com/[^)]+' input_text.txt >> extracted_links_raw.txt 2>/dev/null || true
+          
+          # Extract URLs that have quotes around them
+          grep -oP '"\Khttps://raw\.githubusercontent\.com/[^"]+' input_text.txt >> extracted_links_raw.txt 2>/dev/null || true
+          grep -oP "'\Khttps://raw\.githubusercontent\.com/[^']+" input_text.txt >> extracted_links_raw.txt 2>/dev/null || true
           
           # Sort and deduplicate
-          sort -u extracted_links.txt -o extracted_links.txt
+          sort -u extracted_links_raw.txt -o extracted_links.txt
+          
+          # Remove empty lines
+          sed -i '/^$/d' extracted_links.txt
           
           # Count links
           LINK_COUNT=$(wc -l < extracted_links.txt)
@@ -52,13 +69,26 @@ jobs:
           echo "=========================================="
           cat extracted_links.txt
           echo "=========================================="
+          
+          if [ "$LINK_COUNT" -eq 0 ]; then
+            echo "No links found. Here are the first 500 characters of input:"
+            head -c 500 input_text.txt
+          fi
 
       - name: Check if links were found
         if: env.LINK_COUNT == 0
         run: |
           echo "❌ No raw.githubusercontent.com links found in the provided text."
-          echo "Please make sure your text contains links like:"
+          echo ""
+          echo "The workflow looks for patterns like:"
           echo "  https://raw.githubusercontent.com/username/repo/branch/filename.zip"
+          echo "  https://raw.githubusercontent.com/username/repo/branch/filename.z01"
+          echo ""
+          echo "Links can have characters before or after them like:"
+          echo "  [https://raw.githubusercontent.com/...]"
+          echo "  (https://raw.githubusercontent.com/...)"
+          echo "  \"https://raw.githubusercontent.com/...\""
+          echo "  [text](https://raw.githubusercontent.com/...)"
           exit 1
 
       - name: Download files using wget
@@ -74,8 +104,11 @@ jobs:
               echo "$LINK"
               echo "=========================================="
               
+              # Clean the link (remove any trailing characters like periods or commas)
+              CLEAN_LINK=$(echo "$LINK" | sed 's/[.,;:]$//')
+              
               # Download with wget
-              wget --content-disposition --trust-server-names "$LINK"
+              wget --content-disposition --trust-server-names "$CLEAN_LINK"
               
               # Find the downloaded file
               DOWNLOADED_FILE=$(ls -1 | head -n 1)
@@ -163,6 +196,6 @@ jobs:
 
       - name: Cleanup
         run: |
-          rm -f download_status.txt extracted_links.txt input_text.txt
+          rm -f download_status.txt extracted_links.txt extracted_links_raw.txt input_text.txt
           rm -rf downloaded_files
           echo "🧹 Cleaned up temporary files"
