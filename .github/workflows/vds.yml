@@ -29,6 +29,11 @@ on:
         description: '📝 Output file name (optional, without extension)'
         required: false
         type: string
+      time_range:
+        description: '⏱️ Time range (e.g., *10:15-20:30, *1:00:00-3:00:00, *10:15-inf, *-20:30). Leave empty for full video.'
+        required: false
+        type: string
+        default: ''
       bale_token:
         description: '🤖 Bale Bot Token (for sending files)'
         required: true
@@ -132,6 +137,7 @@ jobs:
         id: download
         run: |
           QUALITY="${{ inputs.quality }}"
+          TIME_RANGE="${{ inputs.time_range }}"
           
           if [ "$QUALITY" = "audio" ]; then
             FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
@@ -148,9 +154,17 @@ jobs:
             OUTPUT_OPTS=""
           fi
           
+          # Add time range option if provided
+          if [ -n "$TIME_RANGE" ]; then
+            TIME_OPTS="--download-sections \"$TIME_RANGE\" --force-keyframes-at-cuts"
+            echo "Time range enabled: $TIME_RANGE"
+          else
+            TIME_OPTS=""
+          fi
+          
           mkdir -p tmpvideos
           cd tmpvideos
-          yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" $FORMAT_OPTS $OUTPUT_OPTS "${{ inputs.youtube_url }}"
+          eval yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" $TIME_OPTS $FORMAT_OPTS $OUTPUT_OPTS "${{ inputs.youtube_url }}"
 
           FILE=$(ls -1 | head -n 1)
           FILE_NO_EXTENSION="${FILE%.*}"
