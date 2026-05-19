@@ -139,12 +139,25 @@ jobs:
           QUALITY="${{ inputs.quality }}"
           TIME_RANGE="${{ inputs.time_range }}"
           
-          if [ "$QUALITY" = "audio" ]; then
-            FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
-          elif [ "$QUALITY" = "best" ]; then
-            FORMAT_OPTS="-f bestvideo+bestaudio/best --merge-output-format mp4"
+          # For time range, use simpler format selection (native downloader)
+          if [ -n "$TIME_RANGE" ]; then
+            echo "Time range mode: $TIME_RANGE"
+            if [ "$QUALITY" = "audio" ]; then
+              FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
+            elif [ "$QUALITY" = "best" ]; then
+              FORMAT_OPTS="-f bv*+ba/b"
+            else
+              FORMAT_OPTS="-f bv*[height<=${QUALITY}]+ba/b[height<=${QUALITY}]"
+            fi
           else
-            FORMAT_OPTS="-f bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}] --merge-output-format mp4"
+            # Original format selection for full video
+            if [ "$QUALITY" = "audio" ]; then
+              FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
+            elif [ "$QUALITY" = "best" ]; then
+              FORMAT_OPTS="-f bestvideo+bestaudio/best --merge-output-format mp4"
+            else
+              FORMAT_OPTS="-f bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}] --merge-output-format mp4"
+            fi
           fi
 
           OUTPUT_NAME="${{ inputs.output_name }}"
