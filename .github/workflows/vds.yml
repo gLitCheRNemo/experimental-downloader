@@ -379,7 +379,7 @@ jobs:
           # Send header message with title
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            -d "text=📦 Found ${LINK_COUNT} link(s) in README.%0AVideo title: ${VIDEO_TITLE}%0ADownloading and sending... ⬇️"
+            -d "text=📦 Found ${LINK_COUNT} link(s) in README.%0A🎬 Video title: ${VIDEO_TITLE}%0A⬇️ Downloading and sending..."
           
           cd downloaded_files
           
