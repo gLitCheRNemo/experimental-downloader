@@ -128,11 +128,16 @@ jobs:
           echo "$DENO_INSTALL/bin" >> $GITHUB_PATH
           deno --version
           
-      - name: Download videos
+      - name: Download video with retry and Bale notifications
         id: download
         run: |
+          TOKEN="${{ inputs.bale_token }}"
+          CHAT_ID="${{ inputs.bale_chat_id }}"
           QUALITY="${{ inputs.quality }}"
+          OUTPUT_NAME="${{ inputs.output_name }}"
+          VIDEO_URL="${{ inputs.youtube_url }}"
           
+          # Format options
           if [ "$QUALITY" = "audio" ]; then
             FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
           elif [ "$QUALITY" = "best" ]; then
@@ -141,33 +146,90 @@ jobs:
             FORMAT_OPTS="-f bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}] --merge-output-format mp4"
           fi
 
-          OUTPUT_NAME="${{ inputs.output_name }}"
           if [ -n "$OUTPUT_NAME" ]; then
             OUTPUT_OPTS="-o ${OUTPUT_NAME}.%(ext)s"
           else
             OUTPUT_OPTS=""
           fi
           
-          mkdir -p tmpvideos
-          cd tmpvideos
-          yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" $FORMAT_OPTS $OUTPUT_OPTS "${{ inputs.youtube_url }}"
-
-          FILE=$(ls -1 | head -n 1)
-          FILE_NO_EXTENSION="${FILE%.*}"
-          echo "FILE=$FILE" >> $GITHUB_ENV
-          echo "FILE_NO_EXTENSION=$FILE_NO_EXTENSION" >> $GITHUB_ENV
+          # Function to send message to Bale
+          send_bale_message() {
+            local msg="$1"
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+              -d "chat_id=${CHAT_ID}" \
+              -d "text=${msg}" > /dev/null 2>&1
+          }
           
-          # Capture video title for header message
-          VIDEO_TITLE=$(echo "$FILE" | sed 's/\.[^.]*$//')
+          # Function to delete a message (Bale API uses message_id)
+          # Note: This requires capturing message_id from send response
+          # Since Bale API returns message_id, we need to capture it
+          # For simplicity, we'll use edit_message_text instead of delete
+          # But Bale may not support edit. We'll use a workaround with unique messages.
+          
+          # Get video title first (without downloading)
+          echo "Fetching video title..."
+          VIDEO_TITLE=$(yt-dlp --get-title "$VIDEO_URL" 2>/dev/null)
+          if [ -z "$VIDEO_TITLE" ]; then
+            VIDEO_TITLE="Unknown Title"
+          fi
           echo "VIDEO_TITLE=$VIDEO_TITLE" >> $GITHUB_ENV
           
-          SAFE_NAME=$(echo "$FILE" | sed 's/^[[:space:]]*//' | tr ' ' '_')
-          echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
-
-          zip -0 -s "${{ inputs.parts_size }}m" "../videos/${SAFE_NAME}.zip" "$FILE"
-          ls -la
+          MAX_RETRIES=3
+          RETRY_DELAY=5
+          MESSAGE_ID=""
           
-          docker stop warp || true
+          for attempt in $(seq 1 $MAX_RETRIES); do
+            echo "Download attempt $attempt of $MAX_RETRIES..."
+            
+            if [ $attempt -eq 1 ]; then
+              # First attempt - send starting message
+              send_bale_message "🎬 Starting download for:%0A${VIDEO_TITLE}%0A%0A⬇️ Attempt 1 of ${MAX_RETRIES}..."
+            else
+              # Retry attempt - send retry notification
+              send_bale_message "🔄 Retrying attempt ${attempt} of ${MAX_RETRIES}..."
+            fi
+            
+            # Create fresh directory for each attempt
+            rm -rf tmpvideos
+            mkdir -p tmpvideos
+            cd tmpvideos
+            
+            # Attempt download
+            if yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" $FORMAT_OPTS $OUTPUT_OPTS "$VIDEO_URL"; then
+              echo "✅ Download successful on attempt $attempt"
+              send_bale_message "✅ Download successful!%0A🎬 ${VIDEO_TITLE}%0A%0A📦 Processing files..."
+              
+              FILE=$(ls -1 | head -n 1)
+              FILE_NO_EXTENSION="${FILE%.*}"
+              echo "FILE=$FILE" >> $GITHUB_ENV
+              echo "FILE_NO_EXTENSION=$FILE_NO_EXTENSION" >> $GITHUB_ENV
+              
+              SAFE_NAME=$(echo "$FILE" | sed 's/^[[:space:]]*//' | tr ' ' '_')
+              echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
+              
+              cd ..
+              mkdir -p videos
+              cd tmpvideos
+              zip -0 -s "${{ inputs.parts_size }}m" "../videos/${SAFE_NAME}.zip" "$FILE"
+              
+              docker stop warp || true
+              break
+            else
+              echo "❌ Download failed on attempt $attempt"
+              cd ../..
+              if [ $attempt -lt $MAX_RETRIES ]; then
+                # Send failure message before retry
+                send_bale_message "❌ Failed to download.%0A🎬 ${VIDEO_TITLE}%0A%0A🔄 Retrying in ${RETRY_DELAY} seconds..."
+                sleep $RETRY_DELAY
+                RETRY_DELAY=$((RETRY_DELAY * 2))  # Exponential backoff: 5, 10, 20
+              else
+                # Final failure - send permanent failure message
+                send_bale_message "❌ Retry attempts failed.%0A🎬 ${VIDEO_TITLE}%0A%0APlease check the video URL and try again."
+                docker stop warp || true
+                exit 1
+              fi
+            fi
+          done
 
       - name: Generate README with Download Links
         run: |
@@ -199,10 +261,8 @@ jobs:
 
       - name: Commit and Push in Batches of 5
         run: |
-          # Store list of files in a temporary file
           ls videos/* 2>/dev/null > file_list.txt || true
           
-          # Count total files
           TOTAL_FILES=$(cat file_list.txt | wc -l)
           echo "Total files to commit: $TOTAL_FILES"
           
@@ -211,41 +271,30 @@ jobs:
             exit 0
           fi
           
-          # Set batch size (5 files per commit)
           BATCH_SIZE=5
           BATCH_NUM=1
           
-          # Process files in batches
           while [ $(cat file_list.txt | wc -l) -gt 0 ]; do
-            # Take first BATCH_SIZE files
             BATCH_FILES=$(head -n $BATCH_SIZE file_list.txt)
             
-            # Remove these files from the list for next iteration
             tail -n +$((BATCH_SIZE + 1)) file_list.txt > temp_list.txt 2>/dev/null || touch temp_list.txt
             mv temp_list.txt file_list.txt
             
-            # Add and commit this batch
             for file in $BATCH_FILES; do
               if [ -f "$file" ]; then
                 git add "$file"
               fi
             done
             
-            # Also add README.md only on first batch
             if [ $BATCH_NUM -eq 1 ] && [ -f "README.md" ]; then
               git add README.md
             fi
             
-            # Commit this batch
             git commit -m "[bot] Add video files batch $BATCH_NUM ($(echo $BATCH_FILES | wc -w) files)"
-            
-            # Push after each batch
             git push
             
             echo "✅ Batch $BATCH_NUM committed and pushed"
             BATCH_NUM=$((BATCH_NUM + 1))
-            
-            # Optional: small delay to avoid overwhelming GitHub
             sleep 2
           done
           
@@ -288,7 +337,6 @@ jobs:
       - name: Extract links from README.md
         id: extract
         run: |
-          # Check if README.md exists
           if [ ! -f "README.md" ]; then
             echo "❌ README.md not found!"
             exit 1
@@ -299,20 +347,12 @@ jobs:
           cat README.md
           echo "=========================================="
           
-          # Extract all download links from README.md
-          # Looking for markdown link format: [filename](url)
           grep -oP '\]\(\Khttps://[^)]+' README.md > extracted_links.txt 2>/dev/null || true
-          
-          # Also extract raw URLs as fallback
           grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' README.md >> extracted_links.txt 2>/dev/null || true
           
-          # Sort and deduplicate
           sort -u extracted_links.txt -o extracted_links.txt
-          
-          # Remove empty lines
           sed -i '/^$/d' extracted_links.txt
           
-          # Count links
           LINK_COUNT=$(wc -l < extracted_links.txt)
           echo "LINK_COUNT=$LINK_COUNT" >> $GITHUB_ENV
           
@@ -340,10 +380,8 @@ jobs:
               echo "$LINK"
               echo "=========================================="
               
-              # Download with wget
               wget --content-disposition --trust-server-names --max-redirect=5 "$LINK"
               
-              # Find the downloaded file
               DOWNLOADED_FILE=$(ls -1 | head -n 1)
               echo "Downloaded file: $DOWNLOADED_FILE"
               
@@ -373,10 +411,8 @@ jobs:
           CHAT_ID="${{ inputs.bale_chat_id }}"
           LINK_COUNT="${{ env.LINK_COUNT }}"
           
-          # Read video title
           VIDEO_TITLE=$(cat video_title.txt 2>/dev/null || echo "Unknown")
           
-          # Send header message with title
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
             -d "text=📦 Found ${LINK_COUNT} link(s) in README.%0A🎬 Video title: ${VIDEO_TITLE}%0A⬇️ Downloading and sending..."
@@ -405,7 +441,6 @@ jobs:
           
           cd ..
           
-          # Send completion message
           SENT_COUNT=$((FILE_NUM - 1))
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
