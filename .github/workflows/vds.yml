@@ -30,7 +30,7 @@ on:
         required: false
         type: string
       time_range:
-        description: '⏱️ Time range (e.g., *10:15-20:30, *1:00:00-3:00:00). Leave empty for full video.'
+        description: '⏱️ Time range (e.g., *10:15-20:30, *1:00:00-3:00:00, *10:15-inf, *-20:30). Leave empty for full video.'
         required: false
         type: string
         default: ''
@@ -44,6 +44,9 @@ on:
         type: string
 
 jobs:
+  # ============================================
+  # JOB 1: Download YouTube video and create README
+  # ============================================
   download-and-release:
     runs-on: ubuntu-latest
     permissions:
@@ -135,8 +138,9 @@ jobs:
         run: |
           QUALITY="${{ inputs.quality }}"
           TIME_RANGE="${{ inputs.time_range }}"
+          OUTPUT_NAME="${{ inputs.output_name }}"
           
-          # Build quality format based on selection
+          # Build format options
           if [ "$QUALITY" = "audio" ]; then
             FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
           elif [ "$QUALITY" = "best" ]; then
@@ -144,25 +148,31 @@ jobs:
           else
             FORMAT_OPTS="-f best[height<=${QUALITY}]"
           fi
-
-          OUTPUT_NAME="${{ inputs.output_name }}"
-          if [ -n "$OUTPUT_NAME" ]; then
-            OUTPUT_OPTS="-o ${OUTPUT_NAME}.%(ext)s"
-          else
-            OUTPUT_OPTS=""
-          fi
           
           mkdir -p tmpvideos
           cd tmpvideos
           
-          # Simple download command
           if [ -n "$TIME_RANGE" ]; then
+            # Time range mode - use unique filename with section times
+            if [ -n "$OUTPUT_NAME" ]; then
+              OUTPUT_OPTS="-o \"${OUTPUT_NAME}_%(section_start)s-%(section_end)s.%(ext)s\""
+            else
+              OUTPUT_OPTS="-o \"%(title)s_%(section_start)s-%(section_end)s.%(ext)s\""
+            fi
+            
             echo "Downloading with time range: $TIME_RANGE"
             yt-dlp --proxy "socks5://127.0.0.1:1080" \
               --download-sections "$TIME_RANGE" \
               --force-keyframes-at-cuts \
               $FORMAT_OPTS $OUTPUT_OPTS "${{ inputs.youtube_url }}"
           else
+            # Normal mode - original behavior
+            if [ -n "$OUTPUT_NAME" ]; then
+              OUTPUT_OPTS="-o ${OUTPUT_NAME}.%(ext)s"
+            else
+              OUTPUT_OPTS=""
+            fi
+            
             echo "Downloading full video"
             yt-dlp --proxy "socks5://127.0.0.1:1080" \
               $FORMAT_OPTS $OUTPUT_OPTS "${{ inputs.youtube_url }}"
@@ -173,7 +183,8 @@ jobs:
           echo "FILE=$FILE" >> $GITHUB_ENV
           echo "FILE_NO_EXTENSION=$FILE_NO_EXTENSION" >> $GITHUB_ENV
           
-          VIDEO_TITLE=$(echo "$FILE" | sed 's/\.[^.]*$//')
+          # Extract video title (remove section timestamps if present)
+          VIDEO_TITLE=$(echo "$FILE" | sed 's/_[0-9.]*-[0-9.]*$//' | sed 's/\.[^.]*$//')
           echo "VIDEO_TITLE=$VIDEO_TITLE" >> $GITHUB_ENV
           
           SAFE_NAME=$(echo "$FILE" | sed 's/^[[:space:]]*//' | tr ' ' '_')
@@ -261,6 +272,9 @@ jobs:
           path: README.md
           retention-days: 1
 
+  # ============================================
+  # JOB 2: Send files to Bale bot using README links
+  # ============================================
   send-to-bot:
     runs-on: ubuntu-latest
     needs: download-and-release
