@@ -109,15 +109,39 @@ jobs:
           WEBSITE_URL: ${{ inputs.website_url }}
           OUTPUT_NAME: ${{ inputs.output_name }}
 
-      - name: Split screenshot into parts
+      - name: Split screenshot (same as VDS/WDS)
+        id: split
         run: |
+          PARTS_SIZE="${{ inputs.parts_size }}"
           OUTPUT_NAME="${{ inputs.output_name }}"
+          FILE_PATH="screenshot/${OUTPUT_NAME}.png"
+          
+          # Get file size in MB
+          FILE_SIZE=$(stat -c%s "$FILE_PATH")
+          FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
+          
+          echo "File size: ${FILE_SIZE_MB} MB"
+          echo "Split size: ${PARTS_SIZE} MB"
+          
           cd screenshot
-          zip -0 -s "${{ inputs.parts_size }}m" "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}.png"
+          
+          if [ $FILE_SIZE_MB -le $PARTS_SIZE ]; then
+            echo "File is smaller than split size. Creating single ZIP file."
+            zip -0 "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}.png"
+            echo "SINGLE_FILE=true" >> $GITHUB_ENV
+          else
+            echo "File is larger than split size. Creating split ZIP archive."
+            zip -0 -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}.png"
+            echo "SINGLE_FILE=false" >> $GITHUB_ENV
+            # Count split parts
+            TOTAL_PARTS=$(ls -1 ${OUTPUT_NAME}.z* ${OUTPUT_NAME}.zip 2>/dev/null | wc -l)
+            echo "TOTAL_PARTS=$TOTAL_PARTS" >> $GITHUB_ENV
+          fi
+          
           cd ..
           echo "Split completed"
 
-      - name: Generate README with Download Links
+      - name: Generate README with Download Links (like VDS)
         run: |
           rm -f README.md
           
