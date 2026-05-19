@@ -30,7 +30,7 @@ on:
         required: false
         type: string
       time_range:
-        description: '⏱️ Time range (e.g., *10:15-20:30, *1:00:00-3:00:00, *10:15-inf, *-20:30). Leave empty for full video.'
+        description: '⏱️ Time range (e.g., *10:15-20:30, *1:00:00-3:00:00). Leave empty for full video.'
         required: false
         type: string
         default: ''
@@ -44,9 +44,6 @@ on:
         type: string
 
 jobs:
-  # ============================================
-  # JOB 1: Download YouTube video and create README
-  # ============================================
   download-and-release:
     runs-on: ubuntu-latest
     permissions:
@@ -139,25 +136,13 @@ jobs:
           QUALITY="${{ inputs.quality }}"
           TIME_RANGE="${{ inputs.time_range }}"
           
-          # Time range compatible format selection (no --merge-output-format)
-          if [ -n "$TIME_RANGE" ]; then
-            echo "Time range mode: $TIME_RANGE"
-            if [ "$QUALITY" = "audio" ]; then
-              FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
-            elif [ "$QUALITY" = "best" ]; then
-              FORMAT_OPTS="-f bv*+ba/b"
-            else
-              FORMAT_OPTS="-f bv*[height<=${QUALITY}]+ba/b[height<=${QUALITY}]"
-            fi
+          # Build quality format based on selection
+          if [ "$QUALITY" = "audio" ]; then
+            FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
+          elif [ "$QUALITY" = "best" ]; then
+            FORMAT_OPTS="-f best"
           else
-            # Original format for full video (works fine)
-            if [ "$QUALITY" = "audio" ]; then
-              FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
-            elif [ "$QUALITY" = "best" ]; then
-              FORMAT_OPTS="-f bestvideo+bestaudio/best --merge-output-format mp4"
-            else
-              FORMAT_OPTS="-f bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}] --merge-output-format mp4"
-            fi
+            FORMAT_OPTS="-f best[height<=${QUALITY}]"
           fi
 
           OUTPUT_NAME="${{ inputs.output_name }}"
@@ -170,12 +155,16 @@ jobs:
           mkdir -p tmpvideos
           cd tmpvideos
           
+          # Simple download command
           if [ -n "$TIME_RANGE" ]; then
-            yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" \
-              --download-sections "$TIME_RANGE" --force-keyframes-at-cuts \
+            echo "Downloading with time range: $TIME_RANGE"
+            yt-dlp --proxy "socks5://127.0.0.1:1080" \
+              --download-sections "$TIME_RANGE" \
+              --force-keyframes-at-cuts \
               $FORMAT_OPTS $OUTPUT_OPTS "${{ inputs.youtube_url }}"
           else
-            yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" \
+            echo "Downloading full video"
+            yt-dlp --proxy "socks5://127.0.0.1:1080" \
               $FORMAT_OPTS $OUTPUT_OPTS "${{ inputs.youtube_url }}"
           fi
 
@@ -272,9 +261,6 @@ jobs:
           path: README.md
           retention-days: 1
 
-  # ============================================
-  # JOB 2: Send files to Bale bot using README links
-  # ============================================
   send-to-bot:
     runs-on: ubuntu-latest
     needs: download-and-release
