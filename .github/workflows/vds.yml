@@ -156,6 +156,11 @@ jobs:
           FILE_NO_EXTENSION="${FILE%.*}"
           echo "FILE=$FILE" >> $GITHUB_ENV
           echo "FILE_NO_EXTENSION=$FILE_NO_EXTENSION" >> $GITHUB_ENV
+          
+          # Capture video title for header message
+          VIDEO_TITLE=$(echo "$FILE" | sed 's/\.[^.]*$//')
+          echo "VIDEO_TITLE=$VIDEO_TITLE" >> $GITHUB_ENV
+          
           SAFE_NAME=$(echo "$FILE" | sed 's/^[[:space:]]*//' | tr ' ' '_')
           echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
 
@@ -180,6 +185,17 @@ jobs:
               echo "- [Download $filename]($url)" >> README.md
             fi
           done
+
+      - name: Save video title to file
+        run: |
+          echo "${{ env.VIDEO_TITLE }}" > video_title.txt
+
+      - name: Upload video title as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-title
+          path: video_title.txt
+          retention-days: 1
 
       - name: Commit and Push in Batches of 5
         run: |
@@ -263,6 +279,12 @@ jobs:
           name: readme-file
           path: .
 
+      - name: Download video title artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: video-title
+          path: .
+
       - name: Extract links from README.md
         id: extract
         run: |
@@ -328,7 +350,7 @@ jobs:
               if [ -f "$DOWNLOADED_FILE" ] && [ -s "$DOWNLOADED_FILE" ]; then
                 SIZE=$(stat -c%s "$DOWNLOADED_FILE")
                 SIZE_MB=$((SIZE / 1024 / 1024))
-                echo "✅ Downloaded: $DOWNLOADED_FILE (${SIZE_MB} MB)"
+                echo "✅ Downloaded: $DOWNLOADED_FILE (${SIZE_MB}MB)"
                 echo "$DOWNLOADED_FILE:SUCCESS:$SIZE" >> ../download_status.txt
               else
                 echo "❌ Failed to download from: $LINK"
@@ -351,10 +373,13 @@ jobs:
           CHAT_ID="${{ inputs.bale_chat_id }}"
           LINK_COUNT="${{ env.LINK_COUNT }}"
           
-          # Send header message
+          # Read video title
+          VIDEO_TITLE=$(cat video_title.txt 2>/dev/null || echo "Unknown")
+          
+          # Send header message with title
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            -d "text=📦 Found ${LINK_COUNT} link(s) in README. Downloading and sending..."
+            -d "text=📦 Found ${LINK_COUNT} link(s) in README.%0AVideo title: ${VIDEO_TITLE}%0ADownloading and sending... ⬇️"
           
           cd downloaded_files
           
@@ -364,7 +389,7 @@ jobs:
               SIZE=$(stat -c%s "$FILE")
               SIZE_MB=$((SIZE / 1024 / 1024))
               
-              echo "Sending file $FILE_NUM: $FILE (${SIZE_MB} MB)"
+              echo "Sending file $FILE_NUM: $FILE (${SIZE_MB}MB)"
               
               curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
                 -F "chat_id=${CHAT_ID}" \
@@ -407,6 +432,6 @@ jobs:
 
       - name: Cleanup
         run: |
-          rm -f README.md download_status.txt extracted_links.txt
+          rm -f README.md video_title.txt download_status.txt extracted_links.txt
           rm -rf downloaded_files
           echo "🧹 Cleaned up temporary files"
