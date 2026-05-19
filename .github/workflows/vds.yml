@@ -161,6 +161,7 @@ jobs:
             fi
             
             echo "Downloading with time range: $TIME_RANGE"
+            # IMPORTANT: The time range MUST be quoted
             yt-dlp --proxy "socks5://127.0.0.1:1080" \
               --download-sections "$TIME_RANGE" \
               --force-keyframes-at-cuts \
