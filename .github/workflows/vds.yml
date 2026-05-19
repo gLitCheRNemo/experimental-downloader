@@ -133,7 +133,7 @@ jobs:
           echo "$DENO_INSTALL/bin" >> $GITHUB_PATH
           deno --version
           
-      - name: Download videos
+            - name: Download videos
         id: download
         run: |
           QUALITY="${{ inputs.quality }}"
@@ -154,17 +154,23 @@ jobs:
             OUTPUT_OPTS=""
           fi
           
-          # Add time range option if provided
-          if [ -n "$TIME_RANGE" ]; then
-            TIME_OPTS="--download-sections \"$TIME_RANGE\" --force-keyframes-at-cuts"
-            echo "Time range enabled: $TIME_RANGE"
-          else
-            TIME_OPTS=""
-          fi
-          
           mkdir -p tmpvideos
           cd tmpvideos
-          eval yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" $TIME_OPTS $FORMAT_OPTS $OUTPUT_OPTS "${{ inputs.youtube_url }}"
+          
+          # Build the command without eval
+          CMD="yt-dlp --remote-components ejs:github --proxy socks5://127.0.0.1:1080"
+          
+          # Add time range if provided
+          if [ -n "$TIME_RANGE" ]; then
+            CMD="$CMD --download-sections \"$TIME_RANGE\" --force-keyframes-at-cuts"
+            echo "Time range enabled: $TIME_RANGE"
+          fi
+          
+          # Add format and output options
+          CMD="$CMD $FORMAT_OPTS $OUTPUT_OPTS \"${{ inputs.youtube_url }}\""
+          
+          echo "Running: $CMD"
+          eval $CMD
 
           FILE=$(ls -1 | head -n 1)
           FILE_NO_EXTENSION="${FILE%.*}"
