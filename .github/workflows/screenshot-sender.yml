@@ -218,14 +218,24 @@ jobs:
           cat README.md
           echo "=========================================="
           
+          # Extract all download links from README.md
           grep -oP '\]\(\Khttps://[^)]+' README.md > extracted_links.txt 2>/dev/null || true
           grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' README.md >> extracted_links.txt 2>/dev/null || true
+          
+          # Remove Windows line endings
+          sed -i 's/\r$//' extracted_links.txt
           
           sort -u extracted_links.txt -o extracted_links.txt
           sed -i '/^$/d' extracted_links.txt
           
           LINK_COUNT=$(wc -l < extracted_links.txt)
           echo "LINK_COUNT=$LINK_COUNT" >> $GITHUB_ENV
+          
+          echo ""
+          echo "Found $LINK_COUNT links in README.md:"
+          echo "=========================================="
+          cat extracted_links.txt
+          echo "=========================================="
           
           if [ "$LINK_COUNT" -eq 0 ]; then
             echo "❌ No download links found in README.md"
@@ -238,24 +248,31 @@ jobs:
           cd downloaded_files
           
           LINK_NUM=1
-          while IFS= read -r LINK; do
+          while IFS= read -r LINK || [ -n "$LINK" ]; do
             if [ -n "$LINK" ]; then
-              echo "Downloading file $LINK_NUM of ${{ env.LINK_COUNT }}"
+              echo "=========================================="
+              echo "Downloading file $LINK_NUM of ${{ env.LINK_COUNT }} from:"
+              echo "$LINK"
+              echo "=========================================="
+              
               wget --content-disposition --trust-server-names --max-redirect=5 "$LINK"
               
-              DOWNLOADED_FILE=$(ls -1 | head -n 1)
-              if [ -f "$DOWNLOADED_FILE" ] && [ -s "$DOWNLOADED_FILE" ]; then
-                SIZE=$(stat -c%s "$DOWNLOADED_FILE")
-                SIZE_MB=$((SIZE / 1024 / 1024))
-                echo "✅ Downloaded: $DOWNLOADED_FILE (${SIZE_MB} MB)"
+              if [ $? -eq 0 ]; then
+                DOWNLOADED_FILE=$(ls -1 | head -n 1)
+                echo "✅ Downloaded: $DOWNLOADED_FILE"
               else
                 echo "❌ Failed to download from: $LINK"
               fi
+              
               LINK_NUM=$((LINK_NUM + 1))
+              echo ""
             fi
           done < ../extracted_links.txt
           
           cd ..
+          
+          echo "Files in downloaded_files directory:"
+          ls -lh downloaded_files/
 
       - name: Send files to Bale bot
         run: |
@@ -268,23 +285,49 @@ jobs:
             -d "text=📸 Found ${LINK_COUNT} link(s). Downloading and sending..."
           
           cd downloaded_files
+          
+          FILE_NUM=1
           for FILE in *; do
             if [ -f "$FILE" ] && [ -s "$FILE" ]; then
               SIZE=$(stat -c%s "$FILE")
               SIZE_MB=$((SIZE / 1024 / 1024))
+              
+              echo "Sending file $FILE_NUM: $FILE (${SIZE_MB} MB)"
+              
               curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
                 -F "chat_id=${CHAT_ID}" \
                 -F "document=@${FILE}" \
                 -F "caption=${FILE} | ${SIZE_MB} MB"
+              
               echo "✅ Sent $FILE"
+              
+              FILE_NUM=$((FILE_NUM + 1))
               sleep 1
             fi
           done
+          
           cd ..
           
+          SENT_COUNT=$((FILE_NUM - 1))
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            -d "text=✅ Done!"
+            -d "text=✅ Done! Sent ${SENT_COUNT} file(s)."
+
+      - name: Show summary
+        run: |
+          echo "## 📊 Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Links found in README | ${{ env.LINK_COUNT }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Extracted links from README.md:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat extracted_links.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Cleanup
-        run: rm -rf screenshot_script screenshot downloaded_files README.md extracted_links.txt
+        run: |
+          rm -f README.md extracted_links.txt
+          rm -rf downloaded_files
+          echo "🧹 Cleaned up temporary files"
