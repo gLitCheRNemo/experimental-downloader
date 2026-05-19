@@ -29,6 +29,11 @@ on:
         description: '📝 Output file name (optional, without extension)'
         required: false
         type: string
+      time_range:
+        description: '⏱️ Time range (e.g., *10:15-20:30, or *10:15-inf, or *-20:30). Leave empty for full video.'
+        required: false
+        type: string
+        default: ''
       bale_token:
         description: '🤖 Bale Bot Token (for sending files)'
         required: true
@@ -128,7 +133,7 @@ jobs:
           echo "$DENO_INSTALL/bin" >> $GITHUB_PATH
           deno --version
           
-      - name: Download video with retry and Bale notifications
+      - name: Download video with retry and time range support
         id: download
         run: |
           TOKEN="${{ inputs.bale_token }}"
@@ -136,6 +141,7 @@ jobs:
           QUALITY="${{ inputs.quality }}"
           OUTPUT_NAME="${{ inputs.output_name }}"
           VIDEO_URL="${{ inputs.youtube_url }}"
+          TIME_RANGE="${{ inputs.time_range }}"
           
           # Format options
           if [ "$QUALITY" = "audio" ]; then
@@ -152,6 +158,14 @@ jobs:
             OUTPUT_OPTS=""
           fi
           
+          # Time range option
+          if [ -n "$TIME_RANGE" ]; then
+            TIME_OPTS="--download-sections \"$TIME_RANGE\" --force-keyframes-at-cuts"
+            echo "Time range enabled: $TIME_RANGE"
+          else
+            TIME_OPTS=""
+          fi
+          
           # Function to send message to Bale
           send_bale_message() {
             local msg="$1"
@@ -159,12 +173,6 @@ jobs:
               -d "chat_id=${CHAT_ID}" \
               -d "text=${msg}" > /dev/null 2>&1
           }
-          
-          # Function to delete a message (Bale API uses message_id)
-          # Note: This requires capturing message_id from send response
-          # Since Bale API returns message_id, we need to capture it
-          # For simplicity, we'll use edit_message_text instead of delete
-          # But Bale may not support edit. We'll use a workaround with unique messages.
           
           # Get video title first (without downloading)
           echo "Fetching video title..."
@@ -176,16 +184,17 @@ jobs:
           
           MAX_RETRIES=3
           RETRY_DELAY=5
-          MESSAGE_ID=""
           
           for attempt in $(seq 1 $MAX_RETRIES); do
             echo "Download attempt $attempt of $MAX_RETRIES..."
             
             if [ $attempt -eq 1 ]; then
-              # First attempt - send starting message
-              send_bale_message "🎬 Starting download for:%0A${VIDEO_TITLE}%0A%0A⬇️ Attempt 1 of ${MAX_RETRIES}..."
+              if [ -n "$TIME_RANGE" ]; then
+                send_bale_message "🎬 Starting download for:%0A${VIDEO_TITLE}%0A⏱️ Time range: ${TIME_RANGE}%0A%0A⬇️ Attempt 1 of ${MAX_RETRIES}..."
+              else
+                send_bale_message "🎬 Starting download for:%0A${VIDEO_TITLE}%0A%0A⬇️ Attempt 1 of ${MAX_RETRIES}..."
+              fi
             else
-              # Retry attempt - send retry notification
               send_bale_message "🔄 Retrying attempt ${attempt} of ${MAX_RETRIES}..."
             fi
             
@@ -194,8 +203,11 @@ jobs:
             mkdir -p tmpvideos
             cd tmpvideos
             
-            # Attempt download
-            if yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" $FORMAT_OPTS $OUTPUT_OPTS "$VIDEO_URL"; then
+            # Build and run download command
+            CMD="yt-dlp --remote-components ejs:github --proxy 'socks5://127.0.0.1:1080' $TIME_OPTS $FORMAT_OPTS $OUTPUT_OPTS '$VIDEO_URL'"
+            echo "Running: $CMD"
+            
+            if eval $CMD; then
               echo "✅ Download successful on attempt $attempt"
               send_bale_message "✅ Download successful!%0A🎬 ${VIDEO_TITLE}%0A%0A📦 Processing files..."
               
@@ -218,12 +230,10 @@ jobs:
               echo "❌ Download failed on attempt $attempt"
               cd ../..
               if [ $attempt -lt $MAX_RETRIES ]; then
-                # Send failure message before retry
                 send_bale_message "❌ Failed to download.%0A🎬 ${VIDEO_TITLE}%0A%0A🔄 Retrying in ${RETRY_DELAY} seconds..."
                 sleep $RETRY_DELAY
-                RETRY_DELAY=$((RETRY_DELAY * 2))  # Exponential backoff: 5, 10, 20
+                RETRY_DELAY=$((RETRY_DELAY * 2))
               else
-                # Final failure - send permanent failure message
                 send_bale_message "❌ Retry attempts failed.%0A🎬 ${VIDEO_TITLE}%0A%0APlease check the video URL and try again."
                 docker stop warp || true
                 exit 1
