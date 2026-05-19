@@ -103,6 +103,60 @@ jobs:
             fi
           done
 
+      - name: Commit and Push in Batches of 5
+        run: |
+          # Store list of files in a temporary file
+          ls web/* 2>/dev/null > file_list.txt || true
+          
+          # Count total files
+          TOTAL_FILES=$(cat file_list.txt | wc -l)
+          echo "Total files to commit: $TOTAL_FILES"
+          
+          if [ "$TOTAL_FILES" -eq 0 ]; then
+            echo "No new files to commit"
+            exit 0
+          fi
+          
+          # Set batch size (5 files per commit)
+          BATCH_SIZE=5
+          BATCH_NUM=1
+          
+          # Process files in batches
+          while [ $(cat file_list.txt | wc -l) -gt 0 ]; do
+            # Take first BATCH_SIZE files
+            BATCH_FILES=$(head -n $BATCH_SIZE file_list.txt)
+            
+            # Remove these files from the list for next iteration
+            tail -n +$((BATCH_SIZE + 1)) file_list.txt > temp_list.txt 2>/dev/null || touch temp_list.txt
+            mv temp_list.txt file_list.txt
+            
+            # Add and commit this batch
+            for file in $BATCH_FILES; do
+              if [ -f "$file" ]; then
+                git add "$file"
+              fi
+            done
+            
+            # Also add README.md only on first batch
+            if [ $BATCH_NUM -eq 1 ] && [ -f "README.md" ]; then
+              git add README.md
+            fi
+            
+            # Commit this batch
+            git commit -m "[bot] Add website files batch $BATCH_NUM ($(echo $BATCH_FILES | wc -w) files)"
+            
+            # Push after each batch
+            git push
+            
+            echo "✅ Batch $BATCH_NUM committed and pushed"
+            BATCH_NUM=$((BATCH_NUM + 1))
+            
+            sleep 2
+          done
+          
+          echo "✅ All $TOTAL_FILES files committed and pushed in batches"
+          rm -f file_list.txt temp_list.txt
+
       - name: Upload README as artifact for next job
         uses: actions/upload-artifact@v4
         with:
