@@ -17,16 +17,6 @@ on:
         required: false
         type: string
         default: '45'
-      zip_password:
-        description: '🔐 ZIP password (optional, leave empty for no password)'
-        required: false
-        type: string
-        default: ''
-      auto_delete:
-        description: '🗑️ Auto-delete bot messages after 5 minutes?'
-        required: false
-        type: boolean
-        default: false
       bale_token:
         description: '🤖 Bale Bot Token (for sending files)'
         required: true
@@ -46,14 +36,6 @@ jobs:
       contents: write
     
     steps:
-      - name: Mask sensitive inputs
-        run: |
-          echo "::add-mask::${{ inputs.bale_token }}"
-          echo "::add-mask::${{ inputs.bale_chat_id }}"
-          if [ -n "${{ inputs.zip_password }}" ]; then
-            echo "::add-mask::${{ inputs.zip_password }}"
-          fi
-
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -80,77 +62,29 @@ jobs:
       - name: Setup ArchiveBox Docker
         run: docker pull archivebox/archivebox:latest
 
-      - name: Archive Website (ArchiveBox)
+      - name: Archive Website
         id: archive
         run: |
-          WEBSITE_URL="${{ inputs.website_url }}"
-          
-          # Create a temporary directory for ArchiveBox data
+          # create a temporary directory for ArchiveBox data
           mkdir -p archive_data
           chmod 777 archive_data
           
-          echo "=========================================="
-          echo "📥 Archiving website with ArchiveBox: $WEBSITE_URL"
-          echo "=========================================="
-          
-          # Initialize ArchiveBox
+          # initialize ArchiveBox
           docker run --rm -v $PWD/archive_data:/data archivebox/archivebox init --setup
           
-          # Add and archive the URL
-          docker run --rm -v $PWD/archive_data:/data archivebox/archivebox add "$WEBSITE_URL"
+          # add and archive the URL
+          docker run --rm -v $PWD/archive_data:/data archivebox/archivebox add "${{ inputs.website_url }}"
           
-          echo "✅ Website archived to ./archive_data/"
-          echo "Files in archive_data:"
-          ls -la archive_data/
-
-      - name: Zip Website Content
-        id: zip
-        run: |
-          OUTPUT_NAME="${{ inputs.output_name }}"
-          ZIP_PASSWORD="${{ inputs.zip_password }}"
-          PARTS_SIZE="${{ inputs.parts_size }}"
-          
-          # Create output directory
+          # move to the branch folder
           mkdir -p web
+          cd web
           
-          echo "=========================================="
-          echo "🗜️ Zipping archived website content..."
-          echo "=========================================="
+          OUTPUT_NAME="${{ inputs.output_name }}"
           
-          # Debug: Check if archive_data exists and has content
-          echo "Checking archive_data contents:"
-          ls -la archive_data/
-          echo "Total size:"
-          du -sh archive_data/
-          
-          # Zip the archive data
-          if [ -n "$ZIP_PASSWORD" ]; then
-            echo "Creating password-protected ZIP archive (no header encryption)..."
-            sudo apt-get update
-            sudo apt-get install -y p7zip-full
-            # Removed -mhe flag for better compatibility
-            7z a -tzip -p"${ZIP_PASSWORD}" -v${PARTS_SIZE}m "web/${OUTPUT_NAME}.zip" ./archive_data
-            cd web
-            # Rename split parts to match expected format
-            for part in ${OUTPUT_NAME}.z*; do
-              if [ -f "$part" ]; then
-                mv "$part" "${OUTPUT_NAME}.$(echo $part | sed 's/.*\.z//')"
-              fi
-            done
-            cd ..
-          else
-            echo "Creating standard ZIP archive (no password)..."
-            zip -0 -r -s ${PARTS_SIZE}m "web/${OUTPUT_NAME}.zip" ./archive_data
-          fi
+          # zip the archive
+          zip -0 -r -s "${{ inputs.parts_size }}m" "${OUTPUT_NAME}.zip" ../archive_data
           
           echo "FILE_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
-          
-          echo "✅ ZIP archive created in ./web/"
-          ls -la web/
-          
-          # Clean up archive_data after zipping
-          rm -rf archive_data
-          echo "🧹 Cleaned up temporary archive_data folder"
 
       - name: Generate README with Download Links
         run: |
@@ -159,11 +93,6 @@ jobs:
           echo "# 📥 Archive Download Links" > README.md
           echo "Generated on: $(date)" >> README.md
           echo "" >> README.md
-          
-          if [ -n "${{ inputs.zip_password }}" ]; then
-            echo "**🔐 This archive is password protected.**" >> README.md
-            echo "" >> README.md
-          fi
           
           for file in web/*; do
             if [ -f "$file" ]; then
@@ -243,17 +172,11 @@ jobs:
     needs: archive-and-release
     if: always() && needs.archive-and-release.result == 'success'
     
-    outputs:
-      messages_json: ${{ steps.store_messages.outputs.messages_json }}
-      
     steps:
       - name: Mask sensitive inputs
         run: |
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
-          if [ -n "${{ inputs.zip_password }}" ]; then
-            echo "::add-mask::${{ inputs.zip_password }}"
-          fi
 
       - name: Download README artifact from previous job
         uses: actions/download-artifact@v4
@@ -333,26 +256,15 @@ jobs:
           echo "Files in downloaded_files directory:"
           ls -lh downloaded_files/
 
-      - name: Send files to Bale bot and store message IDs
-        id: store_messages
+      - name: Send files to Bale bot
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
           LINK_COUNT="${{ env.LINK_COUNT }}"
-          AUTO_DELETE="${{ inputs.auto_delete }}"
           
-          # Initialize JSON array for message IDs
-          MESSAGE_IDS="[]"
-          
-          if [ -n "${{ inputs.zip_password }}" ]; then
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-              -d "chat_id=${CHAT_ID}" \
-              -d "text=📦 Found ${LINK_COUNT} link(s) in README. Downloading and sending...%0A%0A🔐 Files are password protected."
-          else
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-              -d "chat_id=${CHAT_ID}" \
-              -d "text=📦 Found ${LINK_COUNT} link(s) in README. Downloading and sending..."
-          fi
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=📦 Found ${LINK_COUNT} link(s) in README. Downloading and sending..."
           
           cd downloaded_files
           
@@ -364,21 +276,12 @@ jobs:
               
               echo "Sending file $FILE_NUM: $FILE (${SIZE_MB} MB)"
               
-              # Send file and capture response to get message_id
-              RESPONSE=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
                 -F "chat_id=${CHAT_ID}" \
                 -F "document=@${FILE}" \
-                -F "caption=${FILE} | ${SIZE_MB} MB")
+                -F "caption=${FILE} | ${SIZE_MB} MB"
               
-              # Extract message_id from response
-              MESSAGE_ID=$(echo "$RESPONSE" | grep -o '"message_id":[0-9]*' | head -1 | cut -d':' -f2)
-              
-              if [ -n "$MESSAGE_ID" ]; then
-                MESSAGE_IDS=$(echo "$MESSAGE_IDS" | jq ". + [$MESSAGE_ID]")
-                echo "✅ Sent $FILE (message_id: $MESSAGE_ID)"
-              else
-                echo "✅ Sent $FILE"
-              fi
+              echo "✅ Sent $FILE"
               
               FILE_NUM=$((FILE_NUM + 1))
               sleep 1
@@ -388,52 +291,9 @@ jobs:
           cd ..
           
           SENT_COUNT=$((FILE_NUM - 1))
-          
-          # Send completion message
-          if [ -n "${{ inputs.zip_password }}" ]; then
-            RESPONSE=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-              -d "chat_id=${CHAT_ID}" \
-              -d "text=✅ Done! Sent ${SENT_COUNT} file(s) from ${LINK_COUNT} link(s).%0A%0A🔐 Files are password protected.")
-          else
-            RESPONSE=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-              -d "chat_id=${CHAT_ID}" \
-              -d "text=✅ Done! Sent ${SENT_COUNT} file(s) from ${LINK_COUNT} link(s).")
-          fi
-          
-          # Get completion message ID
-          COMPLETION_MSG_ID=$(echo "$RESPONSE" | grep -o '"message_id":[0-9]*' | head -1 | cut -d':' -f2)
-          if [ -n "$COMPLETION_MSG_ID" ]; then
-            MESSAGE_IDS=$(echo "$MESSAGE_IDS" | jq ". + [$COMPLETION_MSG_ID]")
-          fi
-          
-          # If auto-delete is enabled, send warning and store IDs
-          if [ "$AUTO_DELETE" = "true" ]; then
-            # Send warning message
-            WARNING_RESPONSE=$(curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-              -d "chat_id=${CHAT_ID}" \
-              -d "text=⚠️ **All messages from this workflow will be deleted in 5 minutes!** ⚠️%0A%0APlease download your files before then.%0A%0A🕐 Timer started...")
-            
-            WARNING_MSG_ID=$(echo "$WARNING_RESPONSE" | grep -o '"message_id":[0-9]*' | head -1 | cut -d':' -f2)
-            if [ -n "$WARNING_MSG_ID" ]; then
-              MESSAGE_IDS=$(echo "$MESSAGE_IDS" | jq ". + [$WARNING_MSG_ID]")
-            fi
-            
-            # Save message IDs to file for the deletion job
-            echo "$MESSAGE_IDS" > message_ids.json
-            echo "CHAT_ID=$CHAT_ID" >> $GITHUB_ENV
-            echo "TOKEN=$TOKEN" >> $GITHUB_ENV
-            echo "AUTO_DELETE=true" >> $GITHUB_ENV
-          fi
-          
-          echo "messages_json=$MESSAGE_IDS" >> $GITHUB_OUTPUT
-
-      - name: Upload message IDs for deletion job
-        if: inputs.auto_delete == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: message-ids
-          path: message_ids.json
-          retention-days: 1
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=✅ Done! Sent ${SENT_COUNT} file(s) from ${LINK_COUNT} link(s)."
 
       - name: Show summary
         run: |
@@ -453,68 +313,9 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
           cat extracted_links.txt >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          if [ "${{ inputs.auto_delete }}" = "true" ]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "🗑️ **Auto-delete enabled:** Messages will be deleted in 5 minutes." >> $GITHUB_STEP_SUMMARY
-          fi
 
       - name: Cleanup
         run: |
           rm -f README.md download_status.txt extracted_links.txt
           rm -rf downloaded_files
           echo "🧹 Cleaned up temporary files"
-
-  # ============================================
-  # JOB 3: Delete messages after 5 minutes (if enabled)
-  # ============================================
-  delete-messages:
-    runs-on: ubuntu-latest
-    needs: [send-to-bot]
-    if: inputs.auto_delete == 'true'
-    
-    steps:
-      - name: Mask sensitive inputs
-        run: |
-          echo "::add-mask::${{ inputs.bale_token }}"
-          echo "::add-mask::${{ inputs.bale_chat_id }}"
-
-      - name: Download message IDs artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: message-ids
-          path: .
-
-      - name: Wait 5 minutes then delete messages
-        run: |
-          # Wait for 5 minutes (300 seconds)
-          echo "🕐 Waiting 5 minutes before deleting messages..."
-          sleep 300
-          
-          TOKEN="${{ inputs.bale_token }}"
-          CHAT_ID="${{ inputs.bale_chat_id }}"
-          
-          # Read message IDs from JSON file
-          if [ -f "message_ids.json" ]; then
-            MESSAGE_IDS=$(cat message_ids.json)
-            echo "Deleting messages: $MESSAGE_IDS"
-            
-            # Delete each message
-            for MSG_ID in $(echo "$MESSAGE_IDS" | jq -r '.[]'); do
-              echo "Deleting message $MSG_ID..."
-              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/deleteMessage" \
-                -H "Content-Type: application/json" \
-                -d "{\"chat_id\":$CHAT_ID,\"message_id\":$MSG_ID}"
-              echo "✅ Deleted message $MSG_ID"
-              sleep 1
-            done
-            
-            # Send final confirmation
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-              -d "chat_id=${CHAT_ID}" \
-              -d "text=🗑️ All messages from this workflow have been deleted as requested."
-          else
-            echo "No message IDs found to delete"
-          fi
-
-      - name: Cleanup
-        run: rm -f message_ids.json
