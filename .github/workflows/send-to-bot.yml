@@ -3,27 +3,16 @@ name: 2- Send To Bot
 on:
   workflow_dispatch:
     inputs:
-      readme_choice:
-        description: '📄 Choose README file (1-5) - 1=README.md, 2=README2.md, etc. (only used with branch_name)'
-        required: false
-        default: '1'
-        type: choice
-        options:
-          - '1'
-          - '2'
-          - '3'
-          - '4'
-          - '5'
       raw_links:
-        description: 'Raw GitHub links (one per line, or space-separated). If provided, all other inputs are ignored.'
+        description: 'Raw GitHub links (one per line, or space-separated). If provided, branch_name and part_numbers are ignored.'
         required: false
         type: string
       branch_name:
-        description: 'Branch name (e.g., videos). Required when using readme_choice or part_numbers.'
+        description: 'Branch name (e.g., videos). Used with part_numbers if raw_links is empty.'
         required: false
         type: string
       part_numbers:
-        description: 'Part numbers or ranges (e.g., 1-10 15 20-25 final). Leave empty to download all links from the README.'
+        description: 'Part numbers or ranges (e.g., 1-10 15 20-25 final). 1-10 includes parts 1 through 10.'
         required: false
         type: string
       bale_token:
@@ -50,102 +39,84 @@ jobs:
           RAW_LINKS="${{ inputs.raw_links }}"
           BRANCH_NAME="${{ inputs.branch_name }}"
           PART_NUMBERS="${{ inputs.part_numbers }}"
-          README_CHOICE="${{ inputs.readme_choice }}"
           
           > extracted_links.txt
           
-          # Case 1: raw_links provided
+          # Function to expand ranges like 1-10 into a list of numbers
+          expand_ranges() {
+            local input="$1"
+            local result=""
+            for token in $input; do
+              if [[ "$token" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                start=${BASH_REMATCH[1]}
+                end=${BASH_REMATCH[2]}
+                if [ $start -le $end ]; then
+                  for ((i=start; i<=end; i++)); do
+                    result="$result $i"
+                  done
+                else
+                  for ((i=start; i>=end; i--)); do
+                    result="$result $i"
+                  done
+                fi
+              else
+                result="$result $token"
+              fi
+            done
+            echo "$result"
+          }
+          
+          # Case 1: raw_links is provided (use it directly)
           if [ -n "$RAW_LINKS" ]; then
             echo "Using raw_links input"
             echo "$RAW_LINKS" | tr ' ' '\n' | grep -E 'https?://' >> extracted_links.txt
             echo "SOURCE=raw_links" >> $GITHUB_ENV
           
-          # Case 2: branch_name required
-          elif [ -n "$BRANCH_NAME" ]; then
+          # Case 2: branch_name and part_numbers are provided
+          elif [ -n "$BRANCH_NAME" ] && [ -n "$PART_NUMBERS" ]; then
             echo "Using branch_name: $BRANCH_NAME"
             
-            # Determine README filename
-            case "$README_CHOICE" in
-              1|"") README_FILE="README.md" ;;
-              2) README_FILE="README2.md" ;;
-              3) README_FILE="README3.md" ;;
-              4) README_FILE="README4.md" ;;
-              5) README_FILE="README5.md" ;;
-              *) README_FILE="README.md" ;;
-            esac
-            echo "Using README file: $README_FILE"
+            # Expand ranges in part_numbers
+            EXPANDED_PARTS=$(expand_ranges "$PART_NUMBERS")
+            echo "Expanded part numbers: $EXPANDED_PARTS"
             
-            # Fetch the README from GitHub raw
+            # Fetch README.md from the branch
             REPO="${{ github.repository }}"
-            README_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${README_FILE}"
+            README_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/README.md"
             echo "Fetching README from: $README_URL"
             
-            HTTP_CODE=$(curl -s -o README.md -w "%{http_code}" "$README_URL")
-            if [ "$HTTP_CODE" != "200" ]; then
-              echo "❌ Failed to fetch $README_FILE (HTTP $HTTP_CODE). Branch: $BRANCH_NAME"
-              echo "Checking available README files in branch $BRANCH_NAME:"
-              curl -s "https://api.github.com/repos/${REPO}/contents?ref=${BRANCH_NAME}" | grep -o '"name": "[^"]*README[^"]*"' || echo "None found"
+            curl -L -o README.md "$README_URL"
+            
+            if [ ! -f "README.md" ]; then
+              echo "❌ Could not fetch README.md from branch: $BRANCH_NAME"
               exit 1
             fi
-            echo "✅ $README_FILE fetched successfully"
             
-            # Function to expand ranges
-            expand_ranges() {
-              local input="$1"
-              local result=""
-              for token in $input; do
-                if [[ "$token" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-                  start=${BASH_REMATCH[1]}
-                  end=${BASH_REMATCH[2]}
-                  if [ $start -le $end ]; then
-                    for ((i=start; i<=end; i++)); do
-                      result="$result $i"
-                    done
-                  else
-                    for ((i=start; i>=end; i--)); do
-                      result="$result $i"
-                    done
-                  fi
-                else
-                  result="$result $token"
-                fi
-              done
-              echo "$result"
-            }
+            echo "✅ README.md fetched successfully"
             
-            if [ -n "$PART_NUMBERS" ]; then
-              echo "Extracting specific part numbers: $PART_NUMBERS"
-              EXPANDED_PARTS=$(expand_ranges "$PART_NUMBERS")
-              echo "Expanded part numbers: $EXPANDED_PARTS"
-              
-              for PART_NUM in $EXPANDED_PARTS; do
-                if [ "$PART_NUM" = "final" ] || [ "$PART_NUM" = "0" ]; then
-                  # Extract .zip link
-                  LINK=$(grep -oE 'https://[^ ]+\.zip' README.md | head -1)
-                  if [ -n "$LINK" ]; then
-                    echo "$LINK" >> extracted_links.txt
-                    echo "Found link for final .zip"
-                  fi
-                else
-                  PART_NUM_PADDED=$(printf "%02d" $PART_NUM)
-                  LINK=$(grep -oE "https://[^ ]+\.z${PART_NUM_PADDED}" README.md | head -1)
-                  if [ -n "$LINK" ]; then
-                    echo "$LINK" >> extracted_links.txt
-                    echo "Found link for .z${PART_NUM_PADDED}"
-                  fi
+            # Extract links for each part number
+            for PART_NUM in $EXPANDED_PARTS; do
+              if [ "$PART_NUM" = "final" ] || [ "$PART_NUM" = "0" ]; then
+                LINK=$(grep -oP '\]\(\Khttps://[^)]+\.zip' README.md | head -1)
+                if [ -n "$LINK" ]; then
+                  echo "$LINK" >> extracted_links.txt
+                  echo "Found link for final .zip"
                 fi
-              done
-              echo "SOURCE=branch_specific" >> $GITHUB_ENV
-            else
-              echo "No part numbers provided - downloading ALL links from $README_FILE"
-              grep -oE 'https://[^ ]+\.(z[0-9]+|zip)' README.md >> extracted_links.txt
-              sort -u extracted_links.txt -o extracted_links.txt
-              echo "SOURCE=branch_all" >> $GITHUB_ENV
-            fi
+              else
+                PART_NUM_PADDED=$(printf "%02d" $PART_NUM)
+                LINK=$(grep -oP '\]\(\Khttps://[^)]+\.z'"${PART_NUM_PADDED}" README.md | head -1)
+                if [ -n "$LINK" ]; then
+                  echo "$LINK" >> extracted_links.txt
+                  echo "Found link for .z${PART_NUM_PADDED}"
+                fi
+              fi
+            done
+            echo "SOURCE=branch" >> $GITHUB_ENV
           
           else
-            echo "❌ ERROR: You must provide either raw_links or branch_name."
-            echo "   If using branch_name, also provide readme_choice and optional part_numbers."
+            echo "❌ No input provided. Please provide either:"
+            echo "  - raw_links (direct links), or"
+            echo "  - branch_name + part_numbers (to fetch from README.md)"
             exit 1
           fi
           
@@ -266,6 +237,6 @@ jobs:
 
       - name: Cleanup
         run: |
-          rm -f README.md download_status.txt extracted_links.txt
+          rm -f README.md download_status.txt extracted_links.txt input_text.txt
           rm -rf downloaded_files
           echo "🧹 Cleaned up temporary files"
