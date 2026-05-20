@@ -124,7 +124,7 @@ jobs:
           echo "$DENO_INSTALL/bin" >> $GITHUB_PATH
           deno --version
 
-      - name: Download multiple videos
+      - name: Download multiple videos and create READMEs
         id: download
         run: |
           QUALITY="${{ inputs.quality }}"
@@ -144,7 +144,6 @@ jobs:
           TOTAL_VIDEOS=${#URL_ARRAY[@]}
           echo "TOTAL_VIDEOS=$TOTAL_VIDEOS" >> $GITHUB_ENV
           
-          # Create arrays to store video info
           VIDEO_NAMES=""
           README_NAMES=""
           
@@ -189,22 +188,30 @@ jobs:
             fi
             README_NAMES="$README_NAMES $README_NAME"
             
-            # Create videos directory if it doesn't exist
+            # Ensure videos directory exists
             mkdir -p ../videos
             
-            # Zip the file
+            # Zip the file into the videos directory
             zip -0 -s "${{ inputs.parts_size }}m" "../videos/${SAFE_NAME}.zip" "$FILE"
             
-            # Create README for this video
+            # Create README in the videos directory
             cd ../videos
             
-            echo "# 📥 Download Links - ${VIDEO_TITLE}" > "$README_NAME"
-            echo "Generated on: $(date)" >> "$README_NAME"
-            echo "" >> "$README_NAME"
+            # Check if README already exists and add new content without overwriting old links
+            if [ -f "$README_NAME" ]; then
+              # Append to existing README
+              echo "" >> "$README_NAME"
+              echo "## New files added on $(date)" >> "$README_NAME"
+            else
+              # Create new README
+              echo "# 📥 Download Links - ${VIDEO_TITLE}" > "$README_NAME"
+              echo "Generated on: $(date)" >> "$README_NAME"
+              echo "" >> "$README_NAME"
+            fi
             
             # Add links to this video's files only
-            for file in *; do
-              if [ -f "$file" ] && [[ "$file" == ${SAFE_NAME}* ]]; then
+            for file in ${SAFE_NAME}*; do
+              if [ -f "$file" ]; then
                 filename=$(basename "$file")
                 encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
                 url="https://github.com/${{ github.repository }}/raw/videos/videos/$encoded_filename"
@@ -225,6 +232,10 @@ jobs:
           # Save arrays for later steps
           echo "VIDEO_NAMES=${VIDEO_NAMES# }" >> $GITHUB_ENV
           echo "README_NAMES=${README_NAMES# }" >> $GITHUB_ENV
+          
+          # List files in videos directory for debugging
+          echo "Files in videos directory:"
+          ls -la videos/
           
           docker stop warp || true
 
@@ -257,17 +268,6 @@ jobs:
 
       - name: Commit and Push in Batches of 5
         run: |
-          # Store list of video files (exclude README files)
-          ls videos/* 2>/dev/null | grep -v README > file_list.txt || true
-          
-          TOTAL_FILES=$(cat file_list.txt | wc -l)
-          echo "Total video files to commit: $TOTAL_FILES"
-          
-          if [ "$TOTAL_FILES" -eq 0 ]; then
-            echo "No new files to commit"
-            exit 0
-          fi
-          
           # First, add all README files
           for readme in videos/README*.md; do
             if [ -f "$readme" ]; then
@@ -276,10 +276,26 @@ jobs:
             fi
           done
           
-          # Commit READMEs first
-          git commit -m "[bot] Add README files for videos"
-          git push
-          echo "✅ README files committed and pushed"
+          # Commit READMEs if any
+          if ! git diff --cached --quiet; then
+            git commit -m "[bot] Add README files for videos"
+            git push
+            echo "✅ README files committed and pushed"
+          else
+            echo "No README files to commit"
+          fi
+          
+          # Store list of video files (exclude README files)
+          ls videos/* 2>/dev/null | grep -v README > file_list.txt || true
+          
+          TOTAL_FILES=$(cat file_list.txt | wc -l)
+          echo "Total video files to commit: $TOTAL_FILES"
+          
+          if [ "$TOTAL_FILES" -eq 0 ]; then
+            echo "No new video files to commit"
+            rm -f file_list.txt
+            exit 0
+          fi
           
           # Set batch size (5 files per commit)
           BATCH_SIZE=5
@@ -367,6 +383,10 @@ jobs:
           VIDEO_ARRAY=(${{ env.VIDEO_NAMES }})
           TOTAL_VIDEOS=${{ env.TOTAL_VIDEOS }}
           
+          echo "README_ARRAY: ${README_ARRAY[@]}"
+          echo "VIDEO_ARRAY: ${VIDEO_ARRAY[@]}"
+          echo "TOTAL_VIDEOS: $TOTAL_VIDEOS"
+          
           for i in "${!README_ARRAY[@]}"; do
             README_FILE="${README_ARRAY[$i]}"
             VIDEO_TITLE="${VIDEO_ARRAY[$i]}"
@@ -385,8 +405,15 @@ jobs:
             
             if [ ! -f "$README_FILE" ]; then
               echo "❌ Could not download $README_FILE"
+              echo "Checking if branch exists..."
+              git clone --depth 1 --branch videos "https://github.com/${REPO}.git" branch_check
+              ls -la branch_check/
+              rm -rf branch_check
               continue
             fi
+            
+            echo "README file contents:"
+            cat "$README_FILE"
             
             # Extract links from README
             grep -oP '\]\(\Khttps://[^)]+' "$README_FILE" > extracted_links.txt 2>/dev/null || true
@@ -396,6 +423,11 @@ jobs:
             sed -i '/^$/d' extracted_links.txt
             
             LINK_COUNT=$(wc -l < extracted_links.txt)
+            
+            if [ "$LINK_COUNT" -eq 0 ]; then
+              echo "❌ No links found in $README_FILE"
+              continue
+            fi
             
             # Send header message for this video
             curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
