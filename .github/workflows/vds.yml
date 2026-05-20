@@ -157,6 +157,7 @@ jobs:
           echo "FILE=$FILE" >> $GITHUB_ENV
           echo "FILE_NO_EXTENSION=$FILE_NO_EXTENSION" >> $GITHUB_ENV
           
+          # Capture video title for header message
           VIDEO_TITLE=$(echo "$FILE" | sed 's/\.[^.]*$//')
           echo "VIDEO_TITLE=$VIDEO_TITLE" >> $GITHUB_ENV
           
@@ -201,6 +202,7 @@ jobs:
           
           echo "README_NAME=$README_NAME" >> $GITHUB_ENV
           echo "Using README file: $README_NAME"
+          cd ..
 
       - name: Generate README with Download Links
         run: |
@@ -208,15 +210,14 @@ jobs:
           
           README_NAME="${{ env.README_NAME }}"
           
-          # Remove existing README with this name if it exists (shouldn't, but just in case)
-          rm -f "$README_NAME"
-          
+          # Create new README (does NOT delete existing ones)
           echo "# 📥 Download Links" > "$README_NAME"
           echo "Generated on: $(date)" >> "$README_NAME"
           echo "" >> "$README_NAME"
           
+          # List all video files (exclude ALL README files from the list)
           for file in *; do
-            if [ -f "$file" ] && [ "$file" != "$README_NAME" ] && [[ ! "$file" =~ ^README[0-9]*\.md$ ]]; then
+            if [ -f "$file" ] && [[ ! "$file" =~ ^README ]]; then
               filename=$(basename "$file")
               encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
               url="https://github.com/${{ github.repository }}/raw/videos/videos/$encoded_filename"
@@ -257,15 +258,31 @@ jobs:
 
       - name: Commit and Push in Batches of 5
         run: |
-          # Store list of files in a temporary file
-          ls videos/* 2>/dev/null > file_list.txt || true
+          # Store list of video files (exclude README files)
+          ls videos/* 2>/dev/null | grep -v README > file_list.txt || true
           
-          # Count total files
+          # Also add the new README file separately
+          README_FILE="videos/${{ env.README_NAME }}"
+          
           TOTAL_FILES=$(cat file_list.txt | wc -l)
-          echo "Total files to commit: $TOTAL_FILES"
+          echo "Total video files to commit: $TOTAL_FILES"
+          echo "README file: $README_FILE"
+          
+          # Add README file first (so it's in the first batch if there are files)
+          if [ -f "$README_FILE" ]; then
+            git add "$README_FILE"
+            echo "Added README: $README_FILE"
+          fi
           
           if [ "$TOTAL_FILES" -eq 0 ]; then
-            echo "No new files to commit"
+            # Only README file to commit
+            if [ -f "$README_FILE" ]; then
+              git commit -m "[bot] Update README file"
+              git push
+              echo "✅ README file committed and pushed"
+            else
+              echo "No new files to commit"
+            fi
             exit 0
           fi
           
@@ -273,7 +290,9 @@ jobs:
           BATCH_SIZE=5
           BATCH_NUM=1
           
-          # Process files in batches
+          # Check if README was already added in this batch
+          README_ADDED=false
+          
           while [ $(cat file_list.txt | wc -l) -gt 0 ]; do
             # Take first BATCH_SIZE files
             BATCH_FILES=$(head -n $BATCH_SIZE file_list.txt)
@@ -282,20 +301,22 @@ jobs:
             tail -n +$((BATCH_SIZE + 1)) file_list.txt > temp_list.txt 2>/dev/null || touch temp_list.txt
             mv temp_list.txt file_list.txt
             
-            # Add and commit this batch
+            # Add this batch of files
             for file in $BATCH_FILES; do
               if [ -f "$file" ]; then
                 git add "$file"
+                echo "  Added: $file"
               fi
             done
             
-            # Also add README only on first batch
-            if [ $BATCH_NUM -eq 1 ]; then
-              git add "videos/${{ env.README_NAME }}"
-            fi
-            
             # Commit this batch
-            git commit -m "[bot] Add video files batch $BATCH_NUM ($(echo $BATCH_FILES | wc -w) files)"
+            if [ $BATCH_NUM -eq 1 ] && [ "$README_ADDED" = false ]; then
+              # README already added before the loop
+              git commit -m "[bot] Add video files batch $BATCH_NUM ($(echo $BATCH_FILES | wc -w) files) and update README"
+              README_ADDED=true
+            else
+              git commit -m "[bot] Add video files batch $BATCH_NUM ($(echo $BATCH_FILES | wc -w) files)"
+            fi
             
             # Push after each batch
             git push
@@ -303,11 +324,10 @@ jobs:
             echo "✅ Batch $BATCH_NUM committed and pushed"
             BATCH_NUM=$((BATCH_NUM + 1))
             
-            # Optional: small delay to avoid overwhelming GitHub
             sleep 2
           done
           
-          echo "✅ All $TOTAL_FILES files committed and pushed in batches"
+          echo "✅ All $TOTAL_FILES files committed and pushed in $((BATCH_NUM - 1)) batches"
           rm -f file_list.txt temp_list.txt
 
   # ============================================
@@ -356,7 +376,6 @@ jobs:
       - name: Extract links from README
         id: extract
         run: |
-          # Check if README exists
           README_FILE="${{ env.README_NAME }}"
           if [ ! -f "$README_FILE" ]; then
             echo "❌ README file $README_FILE not found!"
@@ -368,7 +387,6 @@ jobs:
           cat "$README_FILE"
           echo "=========================================="
           
-          # Extract all download links from README
           grep -oP '\]\(\Khttps://[^)]+' "$README_FILE" > extracted_links.txt 2>/dev/null || true
           grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' "$README_FILE" >> extracted_links.txt 2>/dev/null || true
           
