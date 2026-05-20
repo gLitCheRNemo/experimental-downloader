@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       readme_choice:
-        description: '📄 Select README file to use (1=README.md, 2=README2.md, 3=README3.md, 4=README4.md, 5=README5.md)'
+        description: '📄 Choose README file (1-5) - 1=README.md, 2=README2.md, etc.'
         required: true
         default: '1'
         type: choice
@@ -14,6 +14,14 @@ on:
           - '3'
           - '4'
           - '5'
+      raw_links:
+        description: 'Raw GitHub links (one per line, or space-separated). If provided, branch_name and part_numbers are ignored.'
+        required: false
+        type: string
+      branch_name:
+        description: 'Branch name (e.g., videos). Used with part_numbers if raw_links is empty and readme_choice is not used.'
+        required: false
+        type: string
       part_numbers:
         description: 'Part numbers or ranges (e.g., 1-10 15 20-25 final). 1-10 includes parts 1 through 10.'
         required: false
@@ -36,34 +44,32 @@ jobs:
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
 
-      - name: Determine README file and extract links
+      - name: Determine source and extract links
         id: extract
         run: |
-          README_CHOICE="${{ inputs.readme_choice }}"
+          RAW_LINKS="${{ inputs.raw_links }}"
+          BRANCH_NAME="${{ inputs.branch_name }}"
           PART_NUMBERS="${{ inputs.part_numbers }}"
-          
-          # Map choice to README filename
-          case "$README_CHOICE" in
-            "1") README_FILE="README.md" ;;
-            "2") README_FILE="README2.md" ;;
-            "3") README_FILE="README3.md" ;;
-            "4") README_FILE="README4.md" ;;
-            "5") README_FILE="README5.md" ;;
-            *) README_FILE="README.md" ;;
-          esac
-          
-          echo "Selected README file: $README_FILE"
-          echo "README_FILE=$README_FILE" >> $GITHUB_ENV
-          
-          # If no part numbers provided, download all links from the README
-          if [ -z "$PART_NUMBERS" ]; then
-            echo "No part numbers provided. Will download ALL links from README."
-            DOWNLOAD_ALL="true"
-          else
-            DOWNLOAD_ALL="false"
-          fi
+          README_CHOICE="${{ inputs.readme_choice }}"
           
           > extracted_links.txt
+          
+          # Determine README filename based on choice
+          if [ "$README_CHOICE" = "1" ]; then
+            README_FILE="README.md"
+          elif [ "$README_CHOICE" = "2" ]; then
+            README_FILE="README2.md"
+          elif [ "$README_CHOICE" = "3" ]; then
+            README_FILE="README3.md"
+          elif [ "$README_CHOICE" = "4" ]; then
+            README_FILE="README4.md"
+          elif [ "$README_CHOICE" = "5" ]; then
+            README_FILE="README5.md"
+          else
+            README_FILE="README.md"
+          fi
+          
+          echo "Using README file: $README_FILE"
           
           # Function to expand ranges like 1-10 into a list of numbers
           expand_ranges() {
@@ -89,42 +95,36 @@ jobs:
             echo "$result"
           }
           
-          # Fetch the README file from the videos branch
-          REPO="${{ github.repository }}"
-          README_URL="https://raw.githubusercontent.com/${REPO}/videos/${README_FILE}"
-          echo "Fetching README from: $README_URL"
+          # Case 1: raw_links is provided (use it directly)
+          if [ -n "$RAW_LINKS" ]; then
+            echo "Using raw_links input"
+            echo "$RAW_LINKS" | tr ' ' '\n' | grep -E 'https?://' >> extracted_links.txt
+            echo "SOURCE=raw_links" >> $GITHUB_ENV
           
-          curl -L -o README.md "$README_URL"
-          
-          if [ ! -f "README.md" ]; then
-            echo "❌ Could not fetch $README_FILE from videos branch"
-            echo "Trying README.md as fallback..."
-            README_URL="https://raw.githubusercontent.com/${REPO}/videos/README.md"
-            curl -L -o README.md "$README_URL"
-            if [ ! -f "README.md" ]; then
-              echo "❌ No README files found in videos branch"
-              exit 1
-            else
-              echo "✅ Using README.md as fallback"
-            fi
-          else
-            echo "✅ $README_FILE fetched successfully"
-          fi
-          
-          echo "README.md contents:"
-          echo "=========================================="
-          cat README.md
-          echo "=========================================="
-          
-          if [ "$DOWNLOAD_ALL" = "true" ]; then
-            # Extract ALL links from README
-            grep -oP '\]\(\Khttps://[^)]+' README.md >> extracted_links.txt 2>/dev/null || true
-            grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' README.md >> extracted_links.txt 2>/dev/null || true
-            echo "SOURCE=all_links" >> $GITHUB_ENV
-          else
+          # Case 2: branch_name and part_numbers are provided (using selected README)
+          elif [ -n "$BRANCH_NAME" ] && [ -n "$PART_NUMBERS" ]; then
+            echo "Using branch_name: $BRANCH_NAME"
+            echo "Using README: $README_FILE"
+            
             # Expand ranges in part_numbers
             EXPANDED_PARTS=$(expand_ranges "$PART_NUMBERS")
             echo "Expanded part numbers: $EXPANDED_PARTS"
+            
+            # Fetch the selected README from the branch
+            REPO="${{ github.repository }}"
+            README_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${README_FILE}"
+            echo "Fetching README from: $README_URL"
+            
+            curl -L -o README.md "$README_URL"
+            
+            if [ ! -f "README.md" ]; then
+              echo "❌ Could not fetch $README_FILE from branch: $BRANCH_NAME"
+              echo "Available README files in branch:"
+              git ls-tree $BRANCH_NAME --name-only | grep -i readme || echo "None found"
+              exit 1
+            fi
+            
+            echo "✅ $README_FILE fetched successfully"
             
             # Extract links for each part number
             for PART_NUM in $EXPANDED_PARTS; do
@@ -144,6 +144,40 @@ jobs:
               fi
             done
             echo "SOURCE=branch" >> $GITHUB_ENV
+          
+          # Case 3: Only branch_name is provided (download all links from selected README)
+          elif [ -n "$BRANCH_NAME" ] && [ -z "$PART_NUMBERS" ]; then
+            echo "Using branch_name: $BRANCH_NAME (no part numbers - downloading all links)"
+            echo "Using README: $README_FILE"
+            
+            REPO="${{ github.repository }}"
+            README_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${README_FILE}"
+            echo "Fetching README from: $README_URL"
+            
+            curl -L -o README.md "$README_URL"
+            
+            if [ ! -f "README.md" ]; then
+              echo "❌ Could not fetch $README_FILE from branch: $BRANCH_NAME"
+              exit 1
+            fi
+            
+            echo "✅ $README_FILE fetched successfully"
+            
+            # Extract ALL links from README
+            grep -oP '\]\(\Khttps://[^)]+' README.md >> extracted_links.txt 2>/dev/null || true
+            grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' README.md >> extracted_links.txt 2>/dev/null || true
+            
+            sort -u extracted_links.txt -o extracted_links.txt
+            sed -i '/^$/d' extracted_links.txt
+            
+            echo "SOURCE=branch_all" >> $GITHUB_ENV
+          
+          else
+            echo "❌ No input provided. Please provide either:"
+            echo "  - raw_links (direct links), or"
+            echo "  - branch_name + part_numbers (to fetch from specific README), or"
+            echo "  - branch_name only (to fetch all links from specific README)"
+            exit 1
           fi
           
           # Clean up extracted links
@@ -207,11 +241,10 @@ jobs:
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
           LINK_COUNT="${{ env.LINK_COUNT }}"
-          README_FILE="${{ env.README_FILE }}"
           
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            -d "text=📄 Using README: ${README_FILE}%0A📦 Found ${LINK_COUNT} link(s). Downloading and sending..."
+            -d "text=📦 Found ${LINK_COUNT} link(s). Downloading and sending..."
           
           cd downloaded_files
           
@@ -248,7 +281,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| README file used | ${{ env.README_FILE }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Source | ${{ env.SOURCE }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Links found | ${{ env.LINK_COUNT }} |" >> $GITHUB_STEP_SUMMARY
           if [ -f "download_status.txt" ]; then
             SUCCESS_COUNT=$(grep -c ":SUCCESS:" download_status.txt || echo "0")
@@ -264,6 +297,6 @@ jobs:
 
       - name: Cleanup
         run: |
-          rm -f README.md download_status.txt extracted_links.txt
+          rm -f README.md download_status.txt extracted_links.txt input_text.txt
           rm -rf downloaded_files
           echo "🧹 Cleaned up temporary files"
