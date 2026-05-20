@@ -25,10 +25,6 @@ on:
         required: false
         type: string
         default: '45'
-      output_name:
-        description: '📝 Output file name (optional, without extension)'
-        required: false
-        type: string
       bale_token:
         description: '🤖 Bale Bot Token (for sending files)'
         required: true
@@ -127,12 +123,11 @@ jobs:
           echo "$DENO_INSTALL/bin" >> $GITHUB_PATH
           deno --version
           
-      - name: Download videos and thumbnail
-        id: download
+      - name: Download video
+        id: download_video
         run: |
           QUALITY="${{ inputs.quality }}"
           
-          # Build format options for video
           if [ "$QUALITY" = "audio" ]; then
             FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
           elif [ "$QUALITY" = "best" ]; then
@@ -140,26 +135,13 @@ jobs:
           else
             FORMAT_OPTS="-f bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}] --merge-output-format mp4"
           fi
-
-          OUTPUT_NAME="${{ inputs.output_name }}"
-          if [ -n "$OUTPUT_NAME" ]; then
-            OUTPUT_OPTS="-o ${OUTPUT_NAME}.%(ext)s"
-          else
-            OUTPUT_OPTS=""
-          fi
           
           mkdir -p tmpvideos
           cd tmpvideos
-          
-          # Download video
-          yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" $FORMAT_OPTS $OUTPUT_OPTS "${{ inputs.youtube_url }}"
-          
-          # Download thumbnail separately (skip video download)
-          yt-dlp --skip-download --write-thumbnail --convert-thumbnails jpg \
-            --output "thumbnail.%(ext)s" "${{ inputs.youtube_url }}"
+          yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" $FORMAT_OPTS "${{ inputs.youtube_url }}"
 
-          # Find the downloaded video file
-          FILE=$(ls -1 | grep -v thumbnail | head -n 1)
+          # Find the downloaded file
+          FILE=$(ls -1 | head -n 1)
           FILE_NO_EXTENSION="${FILE%.*}"
           echo "FILE=$FILE" >> $GITHUB_ENV
           echo "FILE_NO_EXTENSION=$FILE_NO_EXTENSION" >> $GITHUB_ENV
@@ -171,6 +153,15 @@ jobs:
           # Create a safe folder name
           SAFE_NAME=$(echo "$FILE" | sed 's/\.[^.]*$//' | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_')
           echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
+
+      - name: Download thumbnail
+        id: download_thumbnail
+        run: |
+          cd tmpvideos
+          
+          # Download thumbnail separately (skip video download)
+          yt-dlp --skip-download --write-thumbnail --convert-thumbnails jpg \
+            --output "thumbnail.%(ext)s" "${{ inputs.youtube_url }}"
           
           # Handle thumbnail if it exists (convert webp to jpg using ffmpeg)
           if [ -f "thumbnail.webp" ]; then
@@ -180,8 +171,9 @@ jobs:
             echo "THUMBNAIL_EXISTS=true" >> $GITHUB_ENV
           else
             echo "THUMBNAIL_EXISTS=false" >> $GITHUB_ENV
-            echo "No thumbnail found"
           fi
+          
+          cd ..
           
           docker stop warp || true
 
