@@ -77,48 +77,59 @@ jobs:
             git push --set-upstream origin web
           fi
 
-      - name: Setup ArchiveBox Docker
-        run: docker pull archivebox/archivebox:latest
-
       - name: Archive Website
         id: archive
         run: |
-          # create a temporary directory for ArchiveBox data
-          mkdir -p archive_data
-          chmod 777 archive_data
-          
-          # initialize ArchiveBox
-          docker run --rm -v $PWD/archive_data:/data archivebox/archivebox init --setup
-          
-          # add and archive the URL
-          docker run --rm -v $PWD/archive_data:/data archivebox/archivebox add "${{ inputs.website_url }}"
-          
-          # move to the branch folder
-          mkdir -p web
-          cd web
-          
           OUTPUT_NAME="${{ inputs.output_name }}"
           ZIP_PASSWORD="${{ inputs.zip_password }}"
           PARTS_SIZE="${{ inputs.parts_size }}"
+          WEBSITE_URL="${{ inputs.website_url }}"
           
-          # zip the archive with optional password
+          # Create a directory for the website files
+          mkdir -p website_content
+          cd website_content
+          
+          # Download the website recursively using wget
+          # -r: recursive
+          # -l inf: infinite depth
+          # -p: download page requisites (images, CSS, JS)
+          # -k: convert links for local viewing
+          # -np: no parent (don't go up)
+          # -E: add .html extension if missing
+          echo "Downloading website: $WEBSITE_URL"
+          wget --recursive --level=inf --page-requisites --convert-links \
+            --no-parent --adjust-extension --wait=1 --random-wait \
+            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            "$WEBSITE_URL"
+          
+          cd ..
+          
+          # Create output directory
+          mkdir -p web
+          
+          # Zip the website content
           if [ -n "$ZIP_PASSWORD" ]; then
             echo "Creating password-protected ZIP archive..."
             sudo apt-get update
             sudo apt-get install -y p7zip-full
-            7z a -tzip -p"${ZIP_PASSWORD}" -mhe -v${PARTS_SIZE}m "${OUTPUT_NAME}.zip" ../archive_data
+            7z a -tzip -p"${ZIP_PASSWORD}" -mhe -v${PARTS_SIZE}m "web/${OUTPUT_NAME}.zip" ./website_content
+            cd web
             # Rename split parts to match expected format
             for part in ${OUTPUT_NAME}.z*; do
               if [ -f "$part" ]; then
                 mv "$part" "${OUTPUT_NAME}.$(echo $part | sed 's/.*\.z//')"
               fi
             done
+            cd ..
           else
             echo "Creating standard ZIP archive (no password)..."
-            zip -0 -r -s "${{ inputs.parts_size }}m" "${OUTPUT_NAME}.zip" ../archive_data
+            zip -0 -r -s ${PARTS_SIZE}m "web/${OUTPUT_NAME}.zip" ./website_content
           fi
           
           echo "FILE_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
+          
+          # Clean up
+          rm -rf website_content
 
       - name: Generate README with Download Links
         run: |
@@ -338,11 +349,10 @@ jobs:
                 -F "document=@${FILE}" \
                 -F "caption=${FILE} | ${SIZE_MB} MB")
               
-              # Extract message_id from response (assuming Bale returns it)
+              # Extract message_id from response
               MESSAGE_ID=$(echo "$RESPONSE" | grep -o '"message_id":[0-9]*' | head -1 | cut -d':' -f2)
               
               if [ -n "$MESSAGE_ID" ]; then
-                # Add to JSON array
                 MESSAGE_IDS=$(echo "$MESSAGE_IDS" | jq ". + [$MESSAGE_ID]")
                 echo "✅ Sent $FILE (message_id: $MESSAGE_ID)"
               else
