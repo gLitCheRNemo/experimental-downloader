@@ -16,16 +16,96 @@ on:
         required: false
         default: '10'
         type: string
+      bale_token:
+        description: '🤖 Bale Bot Token (for sending result message)'
+        required: false
+        type: string
+      bale_chat_id:
+        description: '💬 Bale Chat ID (for sending result message)'
+        required: false
+        type: string
 
 permissions:
   contents: write
 
 jobs:
   # ============================================
-  # JOB 1: Delete multiple branches
+  # JOB 1: Calculate branch sizes before deletion
+  # ============================================
+  calculate-branch-sizes:
+    runs-on: ubuntu-latest
+    outputs:
+      branch_sizes: ${{ steps.calc.outputs.branch_sizes }}
+      total_branch_size_bytes: ${{ steps.calc.outputs.total_branch_size_bytes }}
+      total_branch_size_human: ${{ steps.calc.outputs.total_branch_size_human }}
+      branch_names: ${{ steps.calc.outputs.branch_names }}
+    steps:
+      - name: Mask sensitive inputs
+        if: ${{ inputs.bale_token != '' && inputs.bale_chat_id != '' }}
+        run: |
+          echo "::add-mask::${{ inputs.bale_token }}"
+          echo "::add-mask::${{ inputs.bale_chat_id }}"
+
+      - name: Calculate branch sizes
+        id: calc
+        run: |
+          BRANCHES_INPUT="${{ inputs.branch_names }}"
+          BRANCHES=($BRANCHES_INPUT)
+          TOTAL_SIZE=0
+          BRANCH_SIZES=""
+          
+          for BRANCH in "${BRANCHES[@]}"; do
+            echo "Calculating size for branch: $BRANCH"
+            
+            # Clone only the specific branch to calculate its size
+            git clone --depth 1 --branch "$BRANCH" "https://github.com/${{ github.repository }}.git" "temp_${BRANCH}"
+            cd "temp_${BRANCH}"
+            
+            # Calculate size of the branch (excluding .git)
+            BRANCH_SIZE=$(du -sb . | cut -f1)
+            TOTAL_SIZE=$((TOTAL_SIZE + BRANCH_SIZE))
+            
+            # Convert to human-readable
+            if [ $BRANCH_SIZE -gt 1073741824 ]; then
+              SIZE_HR=$(echo "scale=2; $BRANCH_SIZE / 1073741824" | bc)
+              SIZE_HR="${SIZE_HR} GB"
+            elif [ $BRANCH_SIZE -gt 1048576 ]; then
+              SIZE_HR=$(echo "scale=2; $BRANCH_SIZE / 1048576" | bc)
+              SIZE_HR="${SIZE_HR} MB"
+            else
+              SIZE_HR=$(echo "scale=2; $BRANCH_SIZE / 1024" | bc)
+              SIZE_HR="${SIZE_HR} KB"
+            fi
+            
+            BRANCH_SIZES="${BRANCH_SIZES}${BRANCH}: ${SIZE_HR}%0A"
+            
+            cd ..
+            rm -rf "temp_${BRANCH}"
+          done
+          
+          # Convert total size to human-readable
+          if [ $TOTAL_SIZE -gt 1073741824 ]; then
+            TOTAL_HR=$(echo "scale=2; $TOTAL_SIZE / 1073741824" | bc)
+            TOTAL_HR="${TOTAL_HR} GB"
+          elif [ $TOTAL_SIZE -gt 1048576 ]; then
+            TOTAL_HR=$(echo "scale=2; $TOTAL_SIZE / 1048576" | bc)
+            TOTAL_HR="${TOTAL_HR} MB"
+          else
+            TOTAL_HR=$(echo "scale=2; $TOTAL_SIZE / 1024" | bc)
+            TOTAL_HR="${TOTAL_HR} KB"
+          fi
+          
+          echo "branch_sizes=$BRANCH_SIZES" >> $GITHUB_OUTPUT
+          echo "total_branch_size_bytes=$TOTAL_SIZE" >> $GITHUB_OUTPUT
+          echo "total_branch_size_human=$TOTAL_HR" >> $GITHUB_OUTPUT
+          echo "branch_names=$BRANCHES_INPUT" >> $GITHUB_OUTPUT
+
+  # ============================================
+  # JOB 2: Delete multiple branches
   # ============================================
   delete-branches:
     runs-on: ubuntu-latest
+    needs: calculate-branch-sizes
     permissions:
       contents: write
     steps:
@@ -37,7 +117,7 @@ jobs:
       - name: Validate and delete branches
         id: validate
         run: |
-          BRANCHES_INPUT="${{ github.event.inputs.branch_names }}"
+          BRANCHES_INPUT="${{ inputs.branch_names }}"
           CONFIRM="${{ github.event.inputs.confirm_deletion }}"
           
           echo "========================================"
@@ -46,185 +126,161 @@ jobs:
           echo "Requested branches: $BRANCHES_INPUT"
           echo ""
           
-          # SAFETY CHECK 1: Verify confirmation text
           if [ "$CONFIRM" != "DELETE" ]; then
             echo "❌ ERROR: Confirmation text does not match."
-            echo "   Please type exactly 'DELETE' in the confirmation field."
             exit 1
           fi
           
-          # Convert space-separated input to array
           BRANCHES=($BRANCHES_INPUT)
           VALID_BRANCHES=""
-          FAILED_BRANCHES=""
           
           git fetch origin
           
           for BRANCH in "${BRANCHES[@]}"; do
-            echo ""
-            echo "Checking branch: $BRANCH"
-            
-            # SAFETY CHECK 2: Refuse to delete main/master branch
             if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
-              echo "  ❌ ERROR: Cannot delete the default branch '$BRANCH'"
-              FAILED_BRANCHES="$FAILED_BRANCHES $BRANCH"
+              echo "❌ Cannot delete default branch: $BRANCH"
               continue
             fi
             
-            # SAFETY CHECK 3: Verify the branch actually exists
             if git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null 2>&1; then
-              echo "  ✅ Branch '$BRANCH' exists and can be deleted"
               VALID_BRANCHES="$VALID_BRANCHES $BRANCH"
             else
-              echo "  ❌ Branch '$BRANCH' does not exist"
-              FAILED_BRANCHES="$FAILED_BRANCHES $BRANCH"
+              echo "❌ Branch does not exist: $BRANCH"
             fi
           done
-          
-          echo ""
-          echo "========================================"
-          echo "Validation summary:"
-          echo "========================================"
-          echo "Valid branches to delete:${VALID_BRANCHES:- none}"
-          echo "Failed branches (skipped):${FAILED_BRANCHES:- none}"
-          echo ""
-          
-          if [ -z "$VALID_BRANCHES" ]; then
-            echo "❌ No valid branches to delete. Exiting."
-            exit 1
-          fi
           
           echo "VALID_BRANCHES=$VALID_BRANCHES" >> $GITHUB_OUTPUT
 
-      - name: Delete each valid branch
+      - name: Delete branches
         if: success() && steps.validate.outputs.VALID_BRANCHES != ''
         run: |
-          BRANCHES="${{ steps.validate.outputs.VALID_BRANCHES }}"
-          
-          for BRANCH in $BRANCHES; do
-            echo "========================================"
-            echo "Deleting branch: $BRANCH"
-            echo "========================================"
-            
+          for BRANCH in ${{ steps.validate.outputs.VALID_BRANCHES }}; do
             git push origin --delete "$BRANCH"
-            
-            if [ $? -eq 0 ]; then
-              echo "✅ Branch '$BRANCH' deleted successfully"
-            else
-              echo "❌ Failed to delete branch '$BRANCH'"
-            fi
-            echo ""
+            echo "✅ Deleted branch: $BRANCH"
           done
 
-      - name: Success message
-        if: success()
-        run: |
-          echo "========================================"
-          echo "✅ Branch deletion completed!"
-          echo "========================================"
-          echo ""
-          echo "The following branches were deleted: ${{ steps.validate.outputs.VALID_BRANCHES }}"
-          echo ""
-          echo "Raw file links (raw.githubusercontent.com) will now return 404 errors for these branches."
-
-      - name: Failure message (if validation failed)
-        if: failure() && steps.validate.outcome == 'failure'
-        run: |
-          echo "========================================"
-          echo "❌ Branch deletion failed"
-          echo "========================================"
-          echo ""
-          echo "Possible reasons:"
-          echo "  - You didn't type 'DELETE' in the confirmation field"
-          echo "  - No valid branches were found to delete"
-          echo ""
-          echo "No changes were made to your repository."
-
   # ============================================
-  # JOB 2: Clear hidden storage (always runs)
+  # JOB 3: Clear hidden storage and calculate sizes
   # ============================================
-  check-status:
-    name: 📊 Check Repository Status
-    needs: delete-branches
+  clean-and-report:
     runs-on: ubuntu-latest
+    needs: [calculate-branch-sizes, delete-branches]
     steps:
-      - name: 📥 Fetch full history
+      - name: Mask sensitive inputs
+        if: ${{ inputs.bale_token != '' && inputs.bale_chat_id != '' }}
+        run: |
+          echo "::add-mask::${{ inputs.bale_token }}"
+          echo "::add-mask::${{ inputs.bale_chat_id }}"
+
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: 📊 Show repository status summary
+      - name: Calculate hidden storage BEFORE cleaning
+        id: before_hidden
         run: |
-          SIZE_LIMIT="${{ github.event.inputs.size_limit }}"
-          SIZE_LIMIT_BYTES=$((SIZE_LIMIT * 1024 * 1024))
+          HIDDEN_BYTES=$(du -sb .git/objects | cut -f1)
+          echo "hidden_bytes=$HIDDEN_BYTES" >> $GITHUB_OUTPUT
           
-          echo "## 📊 Repository Status Before Cleaning" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### ⚙️ Settings" >> $GITHUB_STEP_SUMMARY
-          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Size limit | ${SIZE_LIMIT} MB |" >> $GITHUB_STEP_SUMMARY
-          echo "| Files larger than ${SIZE_LIMIT}MB will be removed | ✅ |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "### 📦 Repository Size" >> $GITHUB_STEP_SUMMARY
-          echo "| Item | Size |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
-          echo "| .git folder | $(du -sh .git | cut -f1) |" >> $GITHUB_STEP_SUMMARY
-          echo "| Objects | $(du -sh .git/objects | cut -f1) |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "### 🔢 Number of Commits" >> $GITHUB_STEP_SUMMARY
-          echo "**$(git rev-list --count HEAD)** commits" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "### 📁 Files larger than ${SIZE_LIMIT}MB in history" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          git rev-list --objects --all | \
-            git cat-file --batch-check='%(objecttype) %(objectname) %(objectsize) %(rest)' | \
-            sed -n 's/^blob //p' | \
-            awk -v LIMIT=$SIZE_LIMIT_BYTES '$2 >= LIMIT { print $3, int($2/1048576) "MB" }' | \
-            sort -k2 -rn | head -20 >> $GITHUB_STEP_SUMMARY || echo "No files found ✅" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          if [ $HIDDEN_BYTES -gt 1073741824 ]; then
+            HIDDEN_HR=$(echo "scale=2; $HIDDEN_BYTES / 1073741824" | bc)
+            echo "hidden_human=${HIDDEN_HR} GB" >> $GITHUB_OUTPUT
+          elif [ $HIDDEN_BYTES -gt 1048576 ]; then
+            HIDDEN_MB=$(echo "scale=2; $HIDDEN_BYTES / 1048576" | bc)
+            echo "hidden_human=${HIDDEN_MB} MB" >> $GITHUB_OUTPUT
+          else
+            HIDDEN_KB=$(echo "scale=2; $HIDDEN_BYTES / 1024" | bc)
+            echo "hidden_human=${HIDDEN_KB} KB" >> $GITHUB_OUTPUT
+          fi
 
-  clean-history:
-    name: 🗑️ Clean Repository History
-    needs: check-status
-    runs-on: ubuntu-latest
-    steps:
-      - name: 📥 Fetch full history
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: ⚙️ Install git-filter-repo
+      - name: Install git-filter-repo
         run: pip install git-filter-repo
 
-      - name: 🧹 Remove files larger than selected size from history
+      - name: Remove files larger than size limit from history
         run: |
-          SIZE_LIMIT="${{ github.event.inputs.size_limit }}"
-          echo "Removing files larger than ${SIZE_LIMIT}MB from history..."
+          SIZE_LIMIT="${{ inputs.size_limit }}"
           git filter-repo --strip-blobs-bigger-than ${SIZE_LIMIT}M --force
 
-      - name: 🚀 Push changes to repository
+      - name: Push cleaned history
         run: |
           git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
           git push --force --all
           git push --force --tags
 
-      - name: ✅ Show final result
+      - name: Calculate hidden storage AFTER cleaning
+        id: after_hidden
+        run: |
+          HIDDEN_BYTES=$(du -sb .git/objects | cut -f1)
+          echo "hidden_bytes=$HIDDEN_BYTES" >> $GITHUB_OUTPUT
+          
+          if [ $HIDDEN_BYTES -gt 1073741824 ]; then
+            HIDDEN_HR=$(echo "scale=2; $HIDDEN_BYTES / 1073741824" | bc)
+            echo "hidden_human=${HIDDEN_HR} GB" >> $GITHUB_OUTPUT
+          elif [ $HIDDEN_BYTES -gt 1048576 ]; then
+            HIDDEN_MB=$(echo "scale=2; $HIDDEN_BYTES / 1048576" | bc)
+            echo "hidden_human=${HIDDEN_MB} MB" >> $GITHUB_OUTPUT
+          else
+            HIDDEN_KB=$(echo "scale=2; $HIDDEN_BYTES / 1024" | bc)
+            echo "hidden_human=${HIDDEN_KB} KB" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Calculate hidden storage removed
+        id: removed_hidden
+        run: |
+          BEFORE=${{ steps.before_hidden.outputs.hidden_bytes }}
+          AFTER=${{ steps.after_hidden.outputs.hidden_bytes }}
+          REMOVED=$((BEFORE - AFTER))
+          echo "removed_bytes=$REMOVED" >> $GITHUB_OUTPUT
+          
+          if [ $REMOVED -gt 1073741824 ]; then
+            REMOVED_HR=$(echo "scale=2; $REMOVED / 1073741824" | bc)
+            echo "removed_human=${REMOVED_HR} GB" >> $GITHUB_OUTPUT
+          elif [ $REMOVED -gt 1048576 ]; then
+            REMOVED_MB=$(echo "scale=2; $REMOVED / 1048576" | bc)
+            echo "removed_human=${REMOVED_MB} MB" >> $GITHUB_OUTPUT
+          else
+            REMOVED_KB=$(echo "scale=2; $REMOVED / 1024" | bc)
+            echo "removed_human=${REMOVED_KB} KB" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send report to Bale bot
+        if: ${{ inputs.bale_token != '' && inputs.bale_chat_id != '' }}
+        run: |
+          TOKEN="${{ inputs.bale_token }}"
+          CHAT_ID="${{ inputs.bale_chat_id }}"
+          BRANCH_NAMES="${{ needs.calculate-branch-sizes.outputs.branch_names }}"
+          BRANCH_SIZES="${{ needs.calculate-branch-sizes.outputs.branch_sizes }}"
+          TOTAL_BRANCH_SIZE="${{ needs.calculate-branch-sizes.outputs.total_branch_size_human }}"
+          HIDDEN_BEFORE="${{ steps.before_hidden.outputs.hidden_human }}"
+          HIDDEN_AFTER="${{ steps.after_hidden.outputs.hidden_human }}"
+          HIDDEN_REMOVED="${{ steps.removed_hidden.outputs.removed_human }}"
+          SIZE_LIMIT="${{ inputs.size_limit }}"
+          
+          MESSAGE="🧹 **CLEANUP REPORT** 🧹%0A%0A"
+          MESSAGE="${MESSAGE}📂 **Deleted Branches:** ${BRANCH_NAMES}%0A"
+          MESSAGE="${MESSAGE}📊 **Total branch size removed:** ${TOTAL_BRANCH_SIZE}%0A%0A"
+          MESSAGE="${MESSAGE}🗄️ **Hidden Storage (before):** ${HIDDEN_BEFORE}%0A"
+          MESSAGE="${MESSAGE}🗑️ **Hidden Storage removed:** ${HIDDEN_REMOVED}%0A"
+          MESSAGE="${MESSAGE}✨ **Hidden Storage (now):** ${HIDDEN_AFTER}%0A%0A"
+          MESSAGE="${MESSAGE}⚙️ **Size limit:** ${SIZE_LIMIT} MB%0A"
+          MESSAGE="${MESSAGE}✅ All files larger than ${SIZE_LIMIT}MB removed from history"
+          
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=${MESSAGE}"
+
+      - name: Show summary in GitHub
         run: |
           echo "## ✅ Cleaning completed successfully!" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### ⚙️ Settings used" >> $GITHUB_STEP_SUMMARY
-          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Size limit | ${{ github.event.inputs.size_limit }} MB |" >> $GITHUB_STEP_SUMMARY
+          echo "### 📂 Deleted Branches" >> $GITHUB_STEP_SUMMARY
+          echo "**${{ needs.calculate-branch-sizes.outputs.branch_names }}**" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📏 New repository size" >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 Size Report" >> $GITHUB_STEP_SUMMARY
           echo "| Item | Size |" >> $GITHUB_STEP_SUMMARY
           echo "|------|------|" >> $GITHUB_STEP_SUMMARY
-          echo "| .git folder | $(du -sh .git | cut -f1) |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "🎉 All files larger than ${{ github.event.inputs.size_limit }}MB have been removed from history!" >> $GITHUB_STEP_SUMMARY
+          echo "| Branches removed | ${{ needs.calculate-branch-sizes.outputs.total_branch_size_human }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Hidden storage (before) | ${{ steps.before_hidden.outputs.hidden_human }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Hidden storage removed | ${{ steps.removed_hidden.outputs.removed_human }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Hidden storage (now) | ${{ steps.after_hidden.outputs.hidden_human }} |" >> $GITHUB_STEP_SUMMARY
