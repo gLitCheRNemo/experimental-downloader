@@ -124,7 +124,39 @@ jobs:
           echo "$DENO_INSTALL/bin" >> $GITHUB_PATH
           deno --version
 
-      - name: Download multiple videos and create READMEs
+      - name: Count URLs and create README files
+        id: prepare
+        run: |
+          URLS="${{ inputs.youtube_urls }}"
+          URL_ARRAY=($URLS)
+          TOTAL_VIDEOS=${#URL_ARRAY[@]}
+          echo "TOTAL_VIDEOS=$TOTAL_VIDEOS" >> $GITHUB_ENV
+          
+          # Create README files for each video BEFORE downloading
+          for i in $(seq 1 $TOTAL_VIDEOS); do
+            if [ $i -eq 1 ]; then
+              README_NAME="README.md"
+            else
+              README_NAME="README${i}.md"
+            fi
+            
+            cd videos
+            echo "# 📥 Download Links - Video $i" > "$README_NAME"
+            echo "Generated on: $(date)" >> "$README_NAME"
+            echo "" >> "$README_NAME"
+            echo "Waiting for download to complete..." >> "$README_NAME"
+            cd ..
+            
+            echo "Created placeholder README: $README_NAME"
+          done
+          
+          # Commit placeholder READMEs first
+          git add videos/README*.md
+          git commit -m "[bot] Create placeholder README files for $TOTAL_VIDEOS videos"
+          git push
+          echo "✅ Placeholder README files committed"
+
+      - name: Download multiple videos and update READMEs
         id: download
         run: |
           QUALITY="${{ inputs.quality }}"
@@ -139,11 +171,8 @@ jobs:
             FORMAT_OPTS="-f bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}] --merge-output-format mp4"
           fi
 
-          # Convert space-separated URLs to array
           URL_ARRAY=($URLS)
           TOTAL_VIDEOS=${#URL_ARRAY[@]}
-          echo "TOTAL_VIDEOS=$TOTAL_VIDEOS" >> $GITHUB_ENV
-          
           VIDEO_NAMES=""
           README_NAMES=""
           
@@ -156,6 +185,14 @@ jobs:
             echo "URL: $URL"
             echo "=========================================="
             
+            # Create README filename for this video
+            if [ $VIDEO_COUNT -eq 1 ]; then
+              README_NAME="README.md"
+            else
+              README_NAME="README${VIDEO_COUNT}.md"
+            fi
+            README_NAMES="$README_NAMES $README_NAME"
+            
             # Create a unique temp directory for this video
             TEMP_DIR="tmpvideos_${VIDEO_COUNT}"
             mkdir -p "$TEMP_DIR"
@@ -167,6 +204,11 @@ jobs:
             # Check if download succeeded
             if [ $? -ne 0 ]; then
               echo "❌ Failed to download video $VIDEO_COUNT"
+              # Update README to show failure
+              cd ../videos
+              echo "" >> "$README_NAME"
+              echo "❌ Download failed for this video" >> "$README_NAME"
+              cd ..
               cd ..
               rm -rf "$TEMP_DIR"
               continue
@@ -180,36 +222,19 @@ jobs:
             # Store video info
             VIDEO_NAMES="$VIDEO_NAMES $VIDEO_TITLE"
             
-            # Create README filename for this video
-            if [ $VIDEO_COUNT -eq 1 ]; then
-              README_NAME="README.md"
-            else
-              README_NAME="README${VIDEO_COUNT}.md"
-            fi
-            README_NAMES="$README_NAMES $README_NAME"
-            
-            # Ensure videos directory exists
-            mkdir -p ../videos
-            
             # Zip the file into the videos directory
+            mkdir -p ../videos
             zip -0 -s "${{ inputs.parts_size }}m" "../videos/${SAFE_NAME}.zip" "$FILE"
             
-            # Create README in the videos directory
+            # Update the README with actual download links
             cd ../videos
             
-            # Check if README already exists and add new content without overwriting old links
-            if [ -f "$README_NAME" ]; then
-              # Append to existing README
-              echo "" >> "$README_NAME"
-              echo "## New files added on $(date)" >> "$README_NAME"
-            else
-              # Create new README
-              echo "# 📥 Download Links - ${VIDEO_TITLE}" > "$README_NAME"
-              echo "Generated on: $(date)" >> "$README_NAME"
-              echo "" >> "$README_NAME"
-            fi
+            # Replace placeholder content with actual links
+            echo "# 📥 Download Links - ${VIDEO_TITLE}" > "$README_NAME"
+            echo "Generated on: $(date)" >> "$README_NAME"
+            echo "" >> "$README_NAME"
             
-            # Add links to this video's files only
+            # Add links to this video's files
             for file in ${SAFE_NAME}*; do
               if [ -f "$file" ]; then
                 filename=$(basename "$file")
@@ -234,55 +259,26 @@ jobs:
           echo "README_NAMES=${README_NAMES# }" >> $GITHUB_ENV
           
           # List files in videos directory for debugging
-          echo "Files in videos directory:"
+          echo "Files in videos directory after download:"
           ls -la videos/
           
           docker stop warp || true
 
-      - name: Save README names to file
+      - name: Commit updated READMEs and video files
         run: |
-          echo "${{ env.README_NAMES }}" > readme_names.txt
-          echo "${{ env.TOTAL_VIDEOS }}" > total_videos.txt
-          echo "${{ env.VIDEO_NAMES }}" > video_names.txt
-
-      - name: Upload README names artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: readme-names
-          path: readme_names.txt
-          retention-days: 1
-
-      - name: Upload total videos artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: total-videos
-          path: total_videos.txt
-          retention-days: 1
-
-      - name: Upload video names artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: video-names
-          path: video_names.txt
-          retention-days: 1
-
-      - name: Commit and Push in Batches of 5
-        run: |
-          # First, add all README files
+          # Add all updated README files
           for readme in videos/README*.md; do
             if [ -f "$readme" ]; then
               git add "$readme"
-              echo "Added README: $readme"
+              echo "Added updated README: $readme"
             fi
           done
           
-          # Commit READMEs if any
+          # Commit README updates
           if ! git diff --cached --quiet; then
-            git commit -m "[bot] Add README files for videos"
+            git commit -m "[bot] Update README files with download links"
             git push
-            echo "✅ README files committed and pushed"
-          else
-            echo "No README files to commit"
+            echo "✅ Updated README files committed"
           fi
           
           # Store list of video files (exclude README files)
@@ -324,6 +320,33 @@ jobs:
           
           echo "✅ All $TOTAL_FILES files committed and pushed in $((BATCH_NUM - 1)) batches"
           rm -f file_list.txt temp_list.txt
+
+      - name: Save README names to file
+        run: |
+          echo "${{ env.README_NAMES }}" > readme_names.txt
+          echo "${{ env.TOTAL_VIDEOS }}" > total_videos.txt
+          echo "${{ env.VIDEO_NAMES }}" > video_names.txt
+
+      - name: Upload README names artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: readme-names
+          path: readme_names.txt
+          retention-days: 1
+
+      - name: Upload total videos artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: total-videos
+          path: total_videos.txt
+          retention-days: 1
+
+      - name: Upload video names artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-names
+          path: video_names.txt
+          retention-days: 1
 
   # ============================================
   # JOB 2: Send files to Bale bot using all README files
@@ -378,44 +401,26 @@ jobs:
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
           
-          # Convert to arrays
           README_ARRAY=(${{ env.README_NAMES }})
           VIDEO_ARRAY=(${{ env.VIDEO_NAMES }})
           TOTAL_VIDEOS=${{ env.TOTAL_VIDEOS }}
-          
-          echo "README_ARRAY: ${README_ARRAY[@]}"
-          echo "VIDEO_ARRAY: ${VIDEO_ARRAY[@]}"
-          echo "TOTAL_VIDEOS: $TOTAL_VIDEOS"
           
           for i in "${!README_ARRAY[@]}"; do
             README_FILE="${README_ARRAY[$i]}"
             VIDEO_TITLE="${VIDEO_ARRAY[$i]}"
             VIDEO_NUM=$((i + 1))
             
-            echo "=========================================="
             echo "Processing video $VIDEO_NUM of $TOTAL_VIDEOS: $VIDEO_TITLE"
-            echo "README file: $README_FILE"
-            echo "=========================================="
             
-            # Download the README file from the videos branch
             REPO="${{ github.repository }}"
             README_URL="https://raw.githubusercontent.com/${REPO}/videos/${README_FILE}"
-            echo "Downloading README from: $README_URL"
             curl -L -o "$README_FILE" "$README_URL"
             
             if [ ! -f "$README_FILE" ]; then
               echo "❌ Could not download $README_FILE"
-              echo "Checking if branch exists..."
-              git clone --depth 1 --branch videos "https://github.com/${REPO}.git" branch_check
-              ls -la branch_check/
-              rm -rf branch_check
               continue
             fi
             
-            echo "README file contents:"
-            cat "$README_FILE"
-            
-            # Extract links from README
             grep -oP '\]\(\Khttps://[^)]+' "$README_FILE" > extracted_links.txt 2>/dev/null || true
             grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' "$README_FILE" >> extracted_links.txt 2>/dev/null || true
             
@@ -424,63 +429,45 @@ jobs:
             
             LINK_COUNT=$(wc -l < extracted_links.txt)
             
-            if [ "$LINK_COUNT" -eq 0 ]; then
-              echo "❌ No links found in $README_FILE"
-              continue
-            fi
-            
-            # Send header message for this video
             curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
               -d "chat_id=${CHAT_ID}" \
               -d "text=📦 Video ${VIDEO_NUM}/${TOTAL_VIDEOS}: ${VIDEO_TITLE}%0A🔗 Found ${LINK_COUNT} link(s)%0A⬇️ Downloading and sending..."
             
-            # Create directory for this video's files
             mkdir -p "video_${VIDEO_NUM}"
             cd "video_${VIDEO_NUM}"
             
             LINK_NUM=1
             while IFS= read -r LINK; do
               if [ -n "$LINK" ]; then
-                echo "Downloading file $LINK_NUM of $LINK_COUNT"
                 wget --content-disposition --trust-server-names --max-redirect=5 "$LINK"
                 LINK_NUM=$((LINK_NUM + 1))
               fi
             done < ../extracted_links.txt
             
-            # Send all files for this video
             FILE_NUM=1
             for FILE in *; do
               if [ -f "$FILE" ] && [ -s "$FILE" ]; then
                 SIZE=$(stat -c%s "$FILE")
                 SIZE_MB=$((SIZE / 1024 / 1024))
-                
                 curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
                   -F "chat_id=${CHAT_ID}" \
                   -F "document=@${FILE}" \
                   -F "caption=${FILE} | ${SIZE_MB}MB"
-                
-                echo "✅ Sent $FILE"
                 FILE_NUM=$((FILE_NUM + 1))
                 sleep 1
               fi
             done
             
             cd ..
-            
-            # Send completion message for this video
             SENT_COUNT=$((FILE_NUM - 1))
             curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
               -d "chat_id=${CHAT_ID}" \
               -d "text=✅ Video ${VIDEO_NUM}/${TOTAL_VIDEOS} complete!%0A📹 ${VIDEO_TITLE}%0A📦 Sent ${SENT_COUNT} file(s)"
             
-            # Clean up
             rm -rf "video_${VIDEO_NUM}" extracted_links.txt "$README_FILE"
-            
-            # Small delay between videos
             sleep 2
           done
           
-          # Send final overall completion message
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
             -d "text=🎉 ALL DONE!%0A📊 Processed ${TOTAL_VIDEOS} video(s) successfully!"
@@ -489,4 +476,3 @@ jobs:
         run: |
           rm -f readme_names.txt video_names.txt total_videos.txt extracted_links.txt
           rm -rf video_*
-          echo "🧹 Cleaned up temporary files"
