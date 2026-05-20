@@ -77,37 +77,31 @@ jobs:
             git push --set-upstream origin web
           fi
 
-      - name: Archive Website (Download with wget)
+      - name: Setup ArchiveBox Docker
+        run: docker pull archivebox/archivebox:latest
+
+      - name: Archive Website (ArchiveBox)
         id: archive
         run: |
           WEBSITE_URL="${{ inputs.website_url }}"
           
-          # Create a directory for the website files
-          mkdir -p website_content
-          cd website_content
+          # Create a temporary directory for ArchiveBox data
+          mkdir -p archive_data
+          chmod 777 archive_data
           
-          # Download the website recursively using wget
-          # -r: recursive
-          # -l inf: infinite depth
-          # -p: download page requisites (images, CSS, JS)
-          # -k: convert links for local viewing
-          # -np: no parent (don't go up)
-          # -E: add .html extension if missing
           echo "=========================================="
-          echo "📥 Downloading website: $WEBSITE_URL"
+          echo "📥 Archiving website with ArchiveBox: $WEBSITE_URL"
           echo "=========================================="
           
-          wget --recursive --level=inf --page-requisites --convert-links \
-            --no-parent --adjust-extension --wait=1 --random-wait \
-            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-            "$WEBSITE_URL"
+          # Initialize ArchiveBox
+          docker run --rm -v $PWD/archive_data:/data archivebox/archivebox init --setup
           
-          cd ..
+          # Add and archive the URL
+          docker run --rm -v $PWD/archive_data:/data archivebox/archivebox add "$WEBSITE_URL"
           
-          echo "✅ Website downloaded to ./website_content/"
-          echo "Files downloaded:"
-          find website_content -type f | wc -l
-          du -sh website_content/
+          echo "✅ Website archived to ./archive_data/"
+          echo "Files in archive_data:"
+          ls -la archive_data/
 
       - name: Zip Website Content
         id: zip
@@ -120,15 +114,15 @@ jobs:
           mkdir -p web
           
           echo "=========================================="
-          echo "🗜️ Zipping website content..."
+          echo "🗜️ Zipping archived website content..."
           echo "=========================================="
           
-          # Zip the website content
+          # Zip the archive data
           if [ -n "$ZIP_PASSWORD" ]; then
             echo "Creating password-protected ZIP archive..."
             sudo apt-get update
             sudo apt-get install -y p7zip-full
-            7z a -tzip -p"${ZIP_PASSWORD}" -mhe -v${PARTS_SIZE}m "web/${OUTPUT_NAME}.zip" ./website_content
+            7z a -tzip -p"${ZIP_PASSWORD}" -mhe -v${PARTS_SIZE}m "web/${OUTPUT_NAME}.zip" ./archive_data
             cd web
             # Rename split parts to match expected format
             for part in ${OUTPUT_NAME}.z*; do
@@ -139,7 +133,7 @@ jobs:
             cd ..
           else
             echo "Creating standard ZIP archive (no password)..."
-            zip -0 -r -s ${PARTS_SIZE}m "web/${OUTPUT_NAME}.zip" ./website_content
+            zip -0 -r -s ${PARTS_SIZE}m "web/${OUTPUT_NAME}.zip" ./archive_data
           fi
           
           echo "FILE_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
@@ -147,9 +141,9 @@ jobs:
           echo "✅ ZIP archive created in ./web/"
           ls -la web/
           
-          # Clean up website_content after zipping
-          rm -rf website_content
-          echo "🧹 Cleaned up temporary website_content folder"
+          # Clean up archive_data after zipping
+          rm -rf archive_data
+          echo "🧹 Cleaned up temporary archive_data folder"
 
       - name: Generate README with Download Links
         run: |
