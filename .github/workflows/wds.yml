@@ -77,12 +77,9 @@ jobs:
             git push --set-upstream origin web
           fi
 
-      - name: Archive Website
+      - name: Archive Website (Download with wget)
         id: archive
         run: |
-          OUTPUT_NAME="${{ inputs.output_name }}"
-          ZIP_PASSWORD="${{ inputs.zip_password }}"
-          PARTS_SIZE="${{ inputs.parts_size }}"
           WEBSITE_URL="${{ inputs.website_url }}"
           
           # Create a directory for the website files
@@ -96,7 +93,10 @@ jobs:
           # -k: convert links for local viewing
           # -np: no parent (don't go up)
           # -E: add .html extension if missing
-          echo "Downloading website: $WEBSITE_URL"
+          echo "=========================================="
+          echo "📥 Downloading website: $WEBSITE_URL"
+          echo "=========================================="
+          
           wget --recursive --level=inf --page-requisites --convert-links \
             --no-parent --adjust-extension --wait=1 --random-wait \
             --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
@@ -104,8 +104,24 @@ jobs:
           
           cd ..
           
+          echo "✅ Website downloaded to ./website_content/"
+          echo "Files downloaded:"
+          find website_content -type f | wc -l
+          du -sh website_content/
+
+      - name: Zip Website Content
+        id: zip
+        run: |
+          OUTPUT_NAME="${{ inputs.output_name }}"
+          ZIP_PASSWORD="${{ inputs.zip_password }}"
+          PARTS_SIZE="${{ inputs.parts_size }}"
+          
           # Create output directory
           mkdir -p web
+          
+          echo "=========================================="
+          echo "🗜️ Zipping website content..."
+          echo "=========================================="
           
           # Zip the website content
           if [ -n "$ZIP_PASSWORD" ]; then
@@ -128,8 +144,12 @@ jobs:
           
           echo "FILE_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
           
-          # Clean up
+          echo "✅ ZIP archive created in ./web/"
+          ls -la web/
+          
+          # Clean up website_content after zipping
           rm -rf website_content
+          echo "🧹 Cleaned up temporary website_content folder"
 
       - name: Generate README with Download Links
         run: |
