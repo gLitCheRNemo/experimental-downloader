@@ -66,7 +66,7 @@ jobs:
           npm init -y
           npm install puppeteer
 
-      - name: Take screenshot
+      - name: Take screenshot (full page)
         id: screenshot
         run: |
           OUTPUT_NAME="${{ inputs.output_name }}"
@@ -84,18 +84,25 @@ jobs:
             });
             const page = await browser.newPage();
             
+            // Set viewport width (height is auto for full page)
             await page.setViewport({ width: 1920, height: 1080 });
             
             const url = process.env.WEBSITE_URL;
             console.log(`Navigating to: ${url}`);
+            
+            // Wait for page to fully load
             await page.goto(url, { waitUntil: 'networkidle2' });
             
-            console.log('Waiting 20 seconds for full page load...');
+            console.log('Waiting 20 seconds for full page load and dynamic content...');
             await new Promise(resolve => setTimeout(resolve, 20000));
             
             const outputName = process.env.OUTPUT_NAME;
-            await page.screenshot({ path: `../screenshot/${outputName}.png`, fullPage: false });
-            console.log(`Screenshot saved: screenshot/${outputName}.png`);
+            // Capture FULL PAGE screenshot (scrolls automatically)
+            await page.screenshot({ 
+              path: `../screenshot/${outputName}.png`, 
+              fullPage: true 
+            });
+            console.log(`Full-page screenshot saved: screenshot/${outputName}.png`);
             
             await browser.close();
           })().catch(err => {
@@ -109,7 +116,7 @@ jobs:
           WEBSITE_URL: ${{ inputs.website_url }}
           OUTPUT_NAME: ${{ inputs.output_name }}
 
-      - name: Split screenshot (single step - correct)
+      - name: Split screenshot
         id: split
         run: |
           PARTS_SIZE="${{ inputs.parts_size }}"
@@ -145,8 +152,10 @@ jobs:
         run: |
           rm -f README.md
           
-          echo "# 📸 Screenshot Download Links" > README.md
+          echo "# 📸 Full-Page Screenshot Download Links" > README.md
           echo "Generated on: $(date)" >> README.md
+          echo "" >> README.md
+          echo "URL: ${{ inputs.website_url }}" >> README.md
           echo "" >> README.md
           
           for file in screenshot/*; do
