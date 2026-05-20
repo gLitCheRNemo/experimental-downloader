@@ -169,22 +169,61 @@ jobs:
           
           docker stop warp || true
 
+      - name: Determine next README filename
+        id: readme_name
+        run: |
+          cd videos
+          
+          # Find the highest existing README number
+          HIGHEST=0
+          for file in README*.md; do
+            if [ -f "$file" ]; then
+              if [ "$file" = "README.md" ]; then
+                NUM=1
+              else
+                NUM=$(echo "$file" | grep -o '[0-9]\+' | head -1)
+                if [ -z "$NUM" ]; then
+                  NUM=1
+                fi
+              fi
+              if [ $NUM -gt $HIGHEST ]; then
+                HIGHEST=$NUM
+              fi
+            fi
+          done
+          
+          NEXT_NUM=$((HIGHEST + 1))
+          
+          if [ $NEXT_NUM -eq 1 ]; then
+            README_NAME="README.md"
+          else
+            README_NAME="README${NEXT_NUM}.md"
+          fi
+          
+          echo "README_NAME=$README_NAME" >> $GITHUB_ENV
+          echo "Using README file: $README_NAME"
+
       - name: Generate README with Download Links
         run: |
-          rm -f README.md
+          cd videos
           
-          echo "# 📥 Download Links" > README.md
-          echo "Generated on: $(date)" >> README.md
-          echo "" >> README.md
+          # Remove any existing README with the same name (but don't delete others)
+          rm -f "${{ env.README_NAME }}"
           
-          for file in videos/*; do
-            if [ -f "$file" ]; then
+          echo "# 📥 Download Links" > "${{ env.README_NAME }}"
+          echo "Generated on: $(date)" >> "${{ env.README_NAME }}"
+          echo "" >> "${{ env.README_NAME }}"
+          
+          for file in *; do
+            if [ -f "$file" ] && [ "$file" != "${{ env.README_NAME }}" ] && [[ "$file" != README*.md ]]; then
               filename=$(basename "$file")
               encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
               url="https://github.com/${{ github.repository }}/raw/videos/videos/$encoded_filename"
-              echo "- [Download $filename]($url)" >> README.md
+              echo "- [Download $filename]($url)" >> "${{ env.README_NAME }}"
             fi
           done
+          
+          cd ..
 
       - name: Save video title to file
         run: |
@@ -196,6 +235,17 @@ jobs:
           name: video-title
           path: video_title.txt
           retention-days: 1
+
+      - name: Upload README name for next job
+        uses: actions/upload-artifact@v4
+        with:
+          name: readme-name
+          path: readme_name.txt
+          retention-days: 1
+
+      - name: Save README name to file
+        run: |
+          echo "${{ env.README_NAME }}" > readme_name.txt
 
       - name: Commit and Push in Batches of 5
         run: |
@@ -231,9 +281,9 @@ jobs:
               fi
             done
             
-            # Also add README.md only on first batch
-            if [ $BATCH_NUM -eq 1 ] && [ -f "README.md" ]; then
-              git add README.md
+            # Also add README only on first batch
+            if [ $BATCH_NUM -eq 1 ]; then
+              git add "videos/${{ env.README_NAME }}"
             fi
             
             # Commit this batch
@@ -252,13 +302,6 @@ jobs:
           echo "✅ All $TOTAL_FILES files committed and pushed in batches"
           rm -f file_list.txt temp_list.txt
 
-      - name: Upload README as artifact for next job
-        uses: actions/upload-artifact@v4
-        with:
-          name: readme-file
-          path: README.md
-          retention-days: 1
-
   # ============================================
   # JOB 2: Send files to Bale bot using README links
   # ============================================
@@ -273,7 +316,13 @@ jobs:
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
 
-      - name: Download README artifact from previous job
+      - name: Download README name artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: readme-name
+          path: .
+
+      - name: Download README artifact
         uses: actions/download-artifact@v4
         with:
           name: readme-file
@@ -285,45 +334,50 @@ jobs:
           name: video-title
           path: .
 
-      - name: Extract links from README.md
+      - name: Get README name
+        id: get_readme_name
+        run: |
+          if [ -f "readme_name.txt" ]; then
+            README_NAME=$(cat readme_name.txt)
+            echo "README_NAME=$README_NAME" >> $GITHUB_ENV
+            echo "Using README: $README_NAME"
+          else
+            echo "README_NAME=README.md" >> $GITHUB_ENV
+          fi
+
+      - name: Extract links from README
         id: extract
         run: |
-          # Check if README.md exists
-          if [ ! -f "README.md" ]; then
-            echo "❌ README.md not found!"
+          # Check if README exists
+          README_FILE="${{ env.README_NAME }}"
+          if [ ! -f "$README_FILE" ]; then
+            echo "❌ README file $README_FILE not found!"
             exit 1
           fi
           
-          echo "README.md contents:"
+          echo "README file contents:"
           echo "=========================================="
-          cat README.md
+          cat "$README_FILE"
           echo "=========================================="
           
-          # Extract all download links from README.md
-          # Looking for markdown link format: [filename](url)
-          grep -oP '\]\(\Khttps://[^)]+' README.md > extracted_links.txt 2>/dev/null || true
+          # Extract all download links from README
+          grep -oP '\]\(\Khttps://[^)]+' "$README_FILE" > extracted_links.txt 2>/dev/null || true
+          grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' "$README_FILE" >> extracted_links.txt 2>/dev/null || true
           
-          # Also extract raw URLs as fallback
-          grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' README.md >> extracted_links.txt 2>/dev/null || true
-          
-          # Sort and deduplicate
           sort -u extracted_links.txt -o extracted_links.txt
-          
-          # Remove empty lines
           sed -i '/^$/d' extracted_links.txt
           
-          # Count links
           LINK_COUNT=$(wc -l < extracted_links.txt)
           echo "LINK_COUNT=$LINK_COUNT" >> $GITHUB_ENV
           
           echo ""
-          echo "Found $LINK_COUNT links in README.md:"
+          echo "Found $LINK_COUNT links in $README_FILE:"
           echo "=========================================="
           cat extracted_links.txt
           echo "=========================================="
           
           if [ "$LINK_COUNT" -eq 0 ]; then
-            echo "❌ No download links found in README.md"
+            echo "❌ No download links found in README"
             exit 1
           fi
 
@@ -340,10 +394,8 @@ jobs:
               echo "$LINK"
               echo "=========================================="
               
-              # Download with wget
               wget --content-disposition --trust-server-names --max-redirect=5 "$LINK"
               
-              # Find the downloaded file
               DOWNLOADED_FILE=$(ls -1 | head -n 1)
               echo "Downloaded file: $DOWNLOADED_FILE"
               
@@ -373,10 +425,8 @@ jobs:
           CHAT_ID="${{ inputs.bale_chat_id }}"
           LINK_COUNT="${{ env.LINK_COUNT }}"
           
-          # Read video title
           VIDEO_TITLE=$(cat video_title.txt 2>/dev/null || echo "Unknown")
           
-          # Send header message with title
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
             -d "text=📦 Found ${LINK_COUNT} link(s) in README.%0A🎬 Video title: ${VIDEO_TITLE}%0A⬇️ Downloading and sending..."
@@ -405,7 +455,6 @@ jobs:
           
           cd ..
           
-          # Send completion message
           SENT_COUNT=$((FILE_NUM - 1))
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
@@ -417,7 +466,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Links found in README | ${{ env.LINK_COUNT }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Links found | ${{ env.LINK_COUNT }} |" >> $GITHUB_STEP_SUMMARY
           if [ -f "download_status.txt" ]; then
             SUCCESS_COUNT=$(grep -c ":SUCCESS:" download_status.txt || echo "0")
             FAILED_COUNT=$(grep -c ":FAILED:" download_status.txt || echo "0")
@@ -425,13 +474,14 @@ jobs:
             echo "| Failed downloads | $FAILED_COUNT |" >> $GITHUB_STEP_SUMMARY
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Extracted links from README.md:" >> $GITHUB_STEP_SUMMARY
+          echo "### README file used: ${{ env.README_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "### Extracted links:" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           cat extracted_links.txt >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Cleanup
         run: |
-          rm -f README.md video_title.txt download_status.txt extracted_links.txt
+          rm -f README*.md video_title.txt download_status.txt extracted_links.txt readme_name.txt
           rm -rf downloaded_files
           echo "🧹 Cleaned up temporary files"
