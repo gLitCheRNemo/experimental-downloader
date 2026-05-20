@@ -157,7 +157,6 @@ jobs:
           echo "FILE=$FILE" >> $GITHUB_ENV
           echo "FILE_NO_EXTENSION=$FILE_NO_EXTENSION" >> $GITHUB_ENV
           
-          # Capture video title for header message
           VIDEO_TITLE=$(echo "$FILE" | sed 's/\.[^.]*$//')
           echo "VIDEO_TITLE=$VIDEO_TITLE" >> $GITHUB_ENV
           
@@ -207,19 +206,21 @@ jobs:
         run: |
           cd videos
           
-          # Remove any existing README with the same name (but don't delete others)
-          rm -f "${{ env.README_NAME }}"
+          README_NAME="${{ env.README_NAME }}"
           
-          echo "# 📥 Download Links" > "${{ env.README_NAME }}"
-          echo "Generated on: $(date)" >> "${{ env.README_NAME }}"
-          echo "" >> "${{ env.README_NAME }}"
+          # Remove existing README with this name if it exists (shouldn't, but just in case)
+          rm -f "$README_NAME"
+          
+          echo "# 📥 Download Links" > "$README_NAME"
+          echo "Generated on: $(date)" >> "$README_NAME"
+          echo "" >> "$README_NAME"
           
           for file in *; do
-            if [ -f "$file" ] && [ "$file" != "${{ env.README_NAME }}" ] && [[ "$file" != README*.md ]]; then
+            if [ -f "$file" ] && [ "$file" != "$README_NAME" ] && [[ ! "$file" =~ ^README[0-9]*\.md$ ]]; then
               filename=$(basename "$file")
               encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
               url="https://github.com/${{ github.repository }}/raw/videos/videos/$encoded_filename"
-              echo "- [Download $filename]($url)" >> "${{ env.README_NAME }}"
+              echo "- [Download $filename]($url)" >> "$README_NAME"
             fi
           done
           
@@ -236,16 +237,23 @@ jobs:
           path: video_title.txt
           retention-days: 1
 
-      - name: Upload README name for next job
+      - name: Save README name to file
+        run: |
+          echo "${{ env.README_NAME }}" > readme_name.txt
+
+      - name: Upload README name as artifact
         uses: actions/upload-artifact@v4
         with:
           name: readme-name
           path: readme_name.txt
           retention-days: 1
 
-      - name: Save README name to file
-        run: |
-          echo "${{ env.README_NAME }}" > readme_name.txt
+      - name: Upload README as artifact for next job
+        uses: actions/upload-artifact@v4
+        with:
+          name: readme-file
+          path: videos/${{ env.README_NAME }}
+          retention-days: 1
 
       - name: Commit and Push in Batches of 5
         run: |
