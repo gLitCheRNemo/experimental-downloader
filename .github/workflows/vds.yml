@@ -172,9 +172,7 @@ jobs:
       - name: Determine next README filename
         id: readme_name
         run: |
-          cd videos
-          
-          # Find the highest existing README number
+          # Find the highest existing README number at the BRANCH ROOT (not inside videos folder)
           HIGHEST=0
           for file in README*.md; do
             if [ -f "$file" ]; then
@@ -201,31 +199,27 @@ jobs:
           fi
           
           echo "README_NAME=$README_NAME" >> $GITHUB_ENV
-          echo "Using README file: $README_NAME"
-          cd ..
+          echo "Using README file at branch root: $README_NAME"
 
-      - name: Generate README with Download Links
+      - name: Generate README with Download Links at Branch Root
         run: |
-          cd videos
-          
           README_NAME="${{ env.README_NAME }}"
           
-          # Create new README (does NOT delete existing ones)
+          # Create README at the BRANCH ROOT (not inside videos folder)
           echo "# 📥 Download Links" > "$README_NAME"
           echo "Generated on: $(date)" >> "$README_NAME"
           echo "" >> "$README_NAME"
           
-          # List all video files (exclude ALL README files from the list)
-          for file in *; do
-            if [ -f "$file" ] && [[ ! "$file" =~ ^README ]]; then
+          # Add links to video files (they are inside the videos/ folder)
+          for file in videos/*; do
+            if [ -f "$file" ]; then
               filename=$(basename "$file")
               encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
+              # Note: files are in the videos/ subfolder
               url="https://github.com/${{ github.repository }}/raw/videos/videos/$encoded_filename"
               echo "- [Download $filename]($url)" >> "$README_NAME"
             fi
           done
-          
-          cd ..
 
       - name: Save video title to file
         run: |
@@ -249,59 +243,45 @@ jobs:
           path: readme_name.txt
           retention-days: 1
 
-      - name: Upload README as artifact for next job
-        uses: actions/upload-artifact@v4
-        with:
-          name: readme-file
-          path: videos/${{ env.README_NAME }}
-          retention-days: 1
-
       - name: Commit and Push in Batches of 5
         run: |
-          # Store list of video files (exclude README files)
-          ls videos/* 2>/dev/null | grep -v README > file_list.txt || true
-          
-          # Also add the new README file separately
-          README_FILE="videos/${{ env.README_NAME }}"
+          # Store list of video files
+          ls videos/* 2>/dev/null > file_list.txt || true
           
           TOTAL_FILES=$(cat file_list.txt | wc -l)
           echo "Total video files to commit: $TOTAL_FILES"
-          echo "README file: $README_FILE"
           
-          # Add README file first (so it's in the first batch if there are files)
+          # Add the README file (at branch root)
+          README_FILE="${{ env.README_NAME }}"
           if [ -f "$README_FILE" ]; then
             git add "$README_FILE"
-            echo "Added README: $README_FILE"
+            echo "Added README at branch root: $README_FILE"
           fi
           
-          if [ "$TOTAL_FILES" -eq 0 ]; then
-            # Only README file to commit
-            if [ -f "$README_FILE" ]; then
-              git commit -m "[bot] Update README file"
-              git push
-              echo "✅ README file committed and pushed"
-            else
-              echo "No new files to commit"
-            fi
+          # Commit README first if it exists
+          if [ -f "$README_FILE" ] && [ "$TOTAL_FILES" -eq 0 ]; then
+            git commit -m "[bot] Update README file"
+            git push
+            echo "✅ README file committed and pushed"
             exit 0
           fi
           
-          # Set batch size (5 files per commit)
+          if [ "$TOTAL_FILES" -eq 0 ]; then
+            echo "No new files to commit"
+            exit 0
+          fi
+          
+          # Commit README along with first batch of videos
           BATCH_SIZE=5
           BATCH_NUM=1
-          
-          # Check if README was already added in this batch
           README_ADDED=false
           
           while [ $(cat file_list.txt | wc -l) -gt 0 ]; do
-            # Take first BATCH_SIZE files
             BATCH_FILES=$(head -n $BATCH_SIZE file_list.txt)
             
-            # Remove these files from the list for next iteration
             tail -n +$((BATCH_SIZE + 1)) file_list.txt > temp_list.txt 2>/dev/null || touch temp_list.txt
             mv temp_list.txt file_list.txt
             
-            # Add this batch of files
             for file in $BATCH_FILES; do
               if [ -f "$file" ]; then
                 git add "$file"
@@ -309,8 +289,7 @@ jobs:
               fi
             done
             
-            # Commit this batch
-            if [ $BATCH_NUM -eq 1 ] && [ "$README_ADDED" = false ]; then
+            if [ $BATCH_NUM -eq 1 ] && [ "$README_ADDED" = false ] && [ -f "$README_FILE" ]; then
               # README already added before the loop
               git commit -m "[bot] Add video files batch $BATCH_NUM ($(echo $BATCH_FILES | wc -w) files) and update README"
               README_ADDED=true
@@ -318,12 +297,10 @@ jobs:
               git commit -m "[bot] Add video files batch $BATCH_NUM ($(echo $BATCH_FILES | wc -w) files)"
             fi
             
-            # Push after each batch
             git push
             
             echo "✅ Batch $BATCH_NUM committed and pushed"
             BATCH_NUM=$((BATCH_NUM + 1))
-            
             sleep 2
           done
           
@@ -350,12 +327,6 @@ jobs:
           name: readme-name
           path: .
 
-      - name: Download README artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: readme-file
-          path: .
-
       - name: Download video title artifact
         uses: actions/download-artifact@v4
         with:
@@ -373,12 +344,21 @@ jobs:
             echo "README_NAME=README.md" >> $GITHUB_ENV
           fi
 
-      - name: Extract links from README
+      - name: Fetch README from branch root
         id: extract
         run: |
           README_FILE="${{ env.README_NAME }}"
+          BRANCH_NAME="videos"
+          REPO="${{ github.repository }}"
+          
+          # README is at the BRANCH ROOT, not inside videos folder
+          README_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${README_FILE}"
+          echo "Fetching README from: $README_URL"
+          
+          curl -L -o "$README_FILE" "$README_URL"
+          
           if [ ! -f "$README_FILE" ]; then
-            echo "❌ README file $README_FILE not found!"
+            echo "❌ Could not fetch $README_FILE from branch root: $BRANCH_NAME"
             exit 1
           fi
           
@@ -387,6 +367,7 @@ jobs:
           cat "$README_FILE"
           echo "=========================================="
           
+          # Extract all download links from README
           grep -oP '\]\(\Khttps://[^)]+' "$README_FILE" > extracted_links.txt 2>/dev/null || true
           grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' "$README_FILE" >> extracted_links.txt 2>/dev/null || true
           
@@ -500,7 +481,7 @@ jobs:
             echo "| Failed downloads | $FAILED_COUNT |" >> $GITHUB_STEP_SUMMARY
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### README file used: ${{ env.README_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "### README file used: ${{ env.README_NAME }} (at branch root)" >> $GITHUB_STEP_SUMMARY
           echo "### Extracted links:" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           cat extracted_links.txt >> $GITHUB_STEP_SUMMARY
