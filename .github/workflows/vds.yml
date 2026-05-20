@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       youtube_urls:
-        description: '🔗 YouTube video URLs (space-separated for multiple)'
+        description: '🔗 YouTube video URL(s) (space-separated for multiple)'
         required: true
         type: string
       quality:
@@ -145,8 +145,8 @@ jobs:
           echo "TOTAL_VIDEOS=$TOTAL_VIDEOS" >> $GITHUB_ENV
           
           # Create arrays to store video info
-          declare -a VIDEO_NAMES
-          declare -a README_NAMES
+          VIDEO_NAMES=""
+          README_NAMES=""
           
           VIDEO_COUNT=0
           
@@ -157,7 +157,7 @@ jobs:
             echo "URL: $URL"
             echo "=========================================="
             
-            # Create a unique temp directory
+            # Create a unique temp directory for this video
             TEMP_DIR="tmpvideos_${VIDEO_COUNT}"
             mkdir -p "$TEMP_DIR"
             cd "$TEMP_DIR"
@@ -165,11 +165,21 @@ jobs:
             # Download the video
             yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" $FORMAT_OPTS "$URL"
             
+            # Check if download succeeded
+            if [ $? -ne 0 ]; then
+              echo "❌ Failed to download video $VIDEO_COUNT"
+              cd ..
+              rm -rf "$TEMP_DIR"
+              continue
+            fi
+            
+            # Get the downloaded file
             FILE=$(ls -1 | head -n 1)
             VIDEO_TITLE=$(echo "$FILE" | sed 's/\.[^.]*$//')
             SAFE_NAME=$(echo "$FILE" | sed 's/^[[:space:]]*//' | tr ' ' '_')
             
-            VIDEO_NAMES+=("$VIDEO_TITLE")
+            # Store video info
+            VIDEO_NAMES="$VIDEO_NAMES $VIDEO_TITLE"
             
             # Create README filename for this video
             if [ $VIDEO_COUNT -eq 1 ]; then
@@ -177,19 +187,22 @@ jobs:
             else
               README_NAME="README${VIDEO_COUNT}.md"
             fi
-            README_NAMES+=("$README_NAME")
+            README_NAMES="$README_NAMES $README_NAME"
+            
+            # Create videos directory if it doesn't exist
+            mkdir -p ../videos
             
             # Zip the file
-            zip -0 -s "${{ inputs.parts_size }}m" "../../videos/${SAFE_NAME}.zip" "$FILE"
+            zip -0 -s "${{ inputs.parts_size }}m" "../videos/${SAFE_NAME}.zip" "$FILE"
             
             # Create README for this video
-            cd ../..
-            cd videos
+            cd ../videos
             
             echo "# 📥 Download Links - ${VIDEO_TITLE}" > "$README_NAME"
             echo "Generated on: $(date)" >> "$README_NAME"
             echo "" >> "$README_NAME"
             
+            # Add links to this video's files only
             for file in *; do
               if [ -f "$file" ] && [[ "$file" == ${SAFE_NAME}* ]]; then
                 filename=$(basename "$file")
@@ -202,12 +215,16 @@ jobs:
             cd ..
             
             # Clean up temp directory
+            cd ..
             rm -rf "$TEMP_DIR"
+            
+            echo "✅ Video $VIDEO_COUNT completed: $VIDEO_TITLE"
+            echo ""
           done
           
           # Save arrays for later steps
-          echo "VIDEO_NAMES=${VIDEO_NAMES[*]}" >> $GITHUB_ENV
-          echo "README_NAMES=${README_NAMES[*]}" >> $GITHUB_ENV
+          echo "VIDEO_NAMES=${VIDEO_NAMES# }" >> $GITHUB_ENV
+          echo "README_NAMES=${README_NAMES# }" >> $GITHUB_ENV
           
           docker stop warp || true
 
@@ -215,6 +232,7 @@ jobs:
         run: |
           echo "${{ env.README_NAMES }}" > readme_names.txt
           echo "${{ env.TOTAL_VIDEOS }}" > total_videos.txt
+          echo "${{ env.VIDEO_NAMES }}" > video_names.txt
 
       - name: Upload README names artifact
         uses: actions/upload-artifact@v4
@@ -236,10 +254,6 @@ jobs:
           name: video-names
           path: video_names.txt
           retention-days: 1
-
-      - name: Save video names to file
-        run: |
-          echo "${{ env.VIDEO_NAMES }}" > video_names.txt
 
       - name: Commit and Push in Batches of 5
         run: |
