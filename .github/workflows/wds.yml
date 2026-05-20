@@ -117,12 +117,19 @@ jobs:
           echo "🗜️ Zipping archived website content..."
           echo "=========================================="
           
+          # Debug: Check if archive_data exists and has content
+          echo "Checking archive_data contents:"
+          ls -la archive_data/
+          echo "Total size:"
+          du -sh archive_data/
+          
           # Zip the archive data
           if [ -n "$ZIP_PASSWORD" ]; then
-            echo "Creating password-protected ZIP archive..."
+            echo "Creating password-protected ZIP archive (no header encryption)..."
             sudo apt-get update
             sudo apt-get install -y p7zip-full
-            7z a -tzip -p"${ZIP_PASSWORD}" -mhe -v${PARTS_SIZE}m "web/${OUTPUT_NAME}.zip" ./archive_data
+            # Removed -mhe flag for better compatibility
+            7z a -tzip -p"${ZIP_PASSWORD}" -v${PARTS_SIZE}m "web/${OUTPUT_NAME}.zip" ./archive_data
             cd web
             # Rename split parts to match expected format
             for part in ${OUTPUT_NAME}.z*; do
