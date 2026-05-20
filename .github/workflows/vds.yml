@@ -115,7 +115,7 @@ jobs:
       - name: Setup yt-dlp
         run: |
           sudo apt-get install -y python3-pip curl
-          pip install yt-dlp --pre
+          pip install yt-dlp --upgrade
 
           curl -fsSL https://deno.land/install.sh | sh
           export DENO_INSTALL="$HOME/.deno"
@@ -154,27 +154,41 @@ jobs:
           SAFE_NAME=$(echo "$FILE" | sed 's/\.[^.]*$//' | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_')
           echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
 
-      - name: Download thumbnail
+      # ============================================
+      # FIXED THUMBNAIL STEP
+      # Based on: https://github.com/ytdl-org/youtube-dl/issues/28457
+      # ============================================
+      - name: Download thumbnail as high-quality JPG
         id: download_thumbnail
         run: |
           cd tmpvideos
           
-          # Download thumbnail separately (skip video download)
-          yt-dlp --skip-download --write-thumbnail --convert-thumbnails jpg \
-            --output "thumbnail.%(ext)s" "${{ inputs.youtube_url }}"
+          # Download and convert thumbnail in ONE COMMAND with high quality settings
+          # --convert-thumbnails jpg : Converts WebP to JPG (yt-dlp exclusive feature)
+          # --ppa "ThumbnailsConvertor:-qmin 1 -q:v 1" : Forces maximum JPEG quality
+          yt-dlp --skip-download \
+                 --write-thumbnail \
+                 --convert-thumbnails jpg \
+                 --ppa "ThumbnailsConvertor:-qmin 1 -q:v 1" \
+                 --output "thumbnail.%(ext)s" \
+                 "${{ inputs.youtube_url }}"
           
-          # Handle thumbnail if it exists (convert webp to jpg using ffmpeg)
-          if [ -f "thumbnail.webp" ]; then
-            ffmpeg -i thumbnail.webp thumbnail.jpg -y
+          # Verify the thumbnail was created successfully
+          if [ -f "thumbnail.jpg" ]; then
+            echo "✅ Thumbnail downloaded and converted to JPG successfully"
             echo "THUMBNAIL_EXISTS=true" >> $GITHUB_ENV
-          elif [ -f "thumbnail.jpg" ]; then
-            echo "THUMBNAIL_EXISTS=true" >> $GITHUB_ENV
+            
+            # Optional: Show file info for debugging
+            ls -lh thumbnail.jpg
+            file thumbnail.jpg
           else
+            echo "⚠️ WARNING: Thumbnail download failed - no thumbnail.jpg found"
             echo "THUMBNAIL_EXISTS=false" >> $GITHUB_ENV
           fi
           
           cd ..
           
+          # Stop WARP container after download is complete
           docker stop warp || true
 
       - name: Create video folder and split files
