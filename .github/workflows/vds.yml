@@ -3,8 +3,8 @@ name: 1- Video Downloader & Sender
 on:
   workflow_dispatch:
     inputs:
-      youtube_url:
-        description: '🔗 YouTube video URL(s)'
+      youtube_urls:
+        description: '🔗 YouTube video URL(s) (space-separated for multiple)'
         required: true
         type: string
       quality:
@@ -40,7 +40,7 @@ on:
 
 jobs:
   # ============================================
-  # JOB 1: Download YouTube video and create README
+  # JOB 1: Download YouTube videos and create README
   # ============================================
   download-and-release:
     runs-on: ubuntu-latest
@@ -132,7 +132,20 @@ jobs:
         id: download
         run: |
           QUALITY="${{ inputs.quality }}"
+          URLS="${{ inputs.youtube_urls }}"
+          OUTPUT_NAME="${{ inputs.output_name }}"
           
+          # Convert space-separated URLs to array
+          URL_ARRAY=($URLS)
+          TOTAL_VIDEOS=${#URL_ARRAY[@]}
+          VIDEO_COUNT=0
+          
+          # Create arrays to store info for each video
+          declare -a FILE_NAMES
+          declare -a VIDEO_TITLES
+          declare -a SAFE_NAMES
+          
+          # Build format options
           if [ "$QUALITY" = "audio" ]; then
             FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
           elif [ "$QUALITY" = "best" ]; then
@@ -140,32 +153,62 @@ jobs:
           else
             FORMAT_OPTS="-f bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}] --merge-output-format mp4"
           fi
-
-          OUTPUT_NAME="${{ inputs.output_name }}"
-          if [ -n "$OUTPUT_NAME" ]; then
-            OUTPUT_OPTS="-o ${OUTPUT_NAME}.%(ext)s"
+          
+          for URL in "${URL_ARRAY[@]}"; do
+            VIDEO_COUNT=$((VIDEO_COUNT + 1))
+            echo "=========================================="
+            echo "Downloading video $VIDEO_COUNT of $TOTAL_VIDEOS"
+            echo "URL: $URL"
+            echo "=========================================="
+            
+            # Create a unique temp directory for each video to avoid conflicts
+            TEMP_DIR="tmpvideos_${VIDEO_COUNT}"
+            mkdir -p "$TEMP_DIR"
+            cd "$TEMP_DIR"
+            
+            # Handle output naming
+            if [ -n "$OUTPUT_NAME" ]; then
+              # If multiple videos, append number to output name
+              if [ $TOTAL_VIDEOS -gt 1 ]; then
+                OUTPUT_OPTS="-o ${OUTPUT_NAME}_${VIDEO_COUNT}.%(ext)s"
+              else
+                OUTPUT_OPTS="-o ${OUTPUT_NAME}.%(ext)s"
+              fi
+            else
+              OUTPUT_OPTS=""
+            fi
+            
+            yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" $FORMAT_OPTS $OUTPUT_OPTS "$URL"
+            
+            FILE=$(ls -1 | head -n 1)
+            FILE_NO_EXTENSION="${FILE%.*}"
+            VIDEO_TITLE=$(echo "$FILE" | sed 's/\.[^.]*$//')
+            SAFE_NAME=$(echo "$FILE" | sed 's/^[[:space:]]*//' | tr ' ' '_')
+            
+            FILE_NAMES+=("$FILE")
+            VIDEO_TITLES+=("$VIDEO_TITLE")
+            SAFE_NAMES+=("$SAFE_NAME")
+            
+            # Zip the file
+            zip -0 -s "${{ inputs.parts_size }}m" "../videos/${SAFE_NAME}.zip" "$FILE"
+            
+            cd ..
+            rm -rf "$TEMP_DIR"
+          done
+          
+          # Save first video title for header message (or combined if multiple)
+          if [ $TOTAL_VIDEOS -eq 1 ]; then
+            echo "VIDEO_TITLE=${VIDEO_TITLES[0]}" >> $GITHUB_ENV
           else
-            OUTPUT_OPTS=""
+            echo "VIDEO_TITLE=${TOTAL_VIDEOS} videos" >> $GITHUB_ENV
           fi
           
-          mkdir -p tmpvideos
-          cd tmpvideos
-          yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" $FORMAT_OPTS $OUTPUT_OPTS "${{ inputs.youtube_url }}"
-
-          FILE=$(ls -1 | head -n 1)
-          FILE_NO_EXTENSION="${FILE%.*}"
-          echo "FILE=$FILE" >> $GITHUB_ENV
-          echo "FILE_NO_EXTENSION=$FILE_NO_EXTENSION" >> $GITHUB_ENV
-          
-          # Capture video title for header message
-          VIDEO_TITLE=$(echo "$FILE" | sed 's/\.[^.]*$//')
-          echo "VIDEO_TITLE=$VIDEO_TITLE" >> $GITHUB_ENV
-          
-          SAFE_NAME=$(echo "$FILE" | sed 's/^[[:space:]]*//' | tr ' ' '_')
-          echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
-
-          zip -0 -s "${{ inputs.parts_size }}m" "../videos/${SAFE_NAME}.zip" "$FILE"
-          ls -la
+          # Save the first SAFE_NAME for the README (or combined)
+          if [ $TOTAL_VIDEOS -eq 1 ]; then
+            echo "SAFE_NAME=${SAFE_NAMES[0]}" >> $GITHUB_ENV
+          else
+            echo "SAFE_NAME=multiple_videos" >> $GITHUB_ENV
+          fi
           
           docker stop warp || true
 
@@ -199,10 +242,8 @@ jobs:
 
       - name: Commit and Push in Batches of 5
         run: |
-          # Store list of files in a temporary file
           ls videos/* 2>/dev/null > file_list.txt || true
           
-          # Count total files
           TOTAL_FILES=$(cat file_list.txt | wc -l)
           echo "Total files to commit: $TOTAL_FILES"
           
@@ -211,41 +252,30 @@ jobs:
             exit 0
           fi
           
-          # Set batch size (5 files per commit)
           BATCH_SIZE=5
           BATCH_NUM=1
           
-          # Process files in batches
           while [ $(cat file_list.txt | wc -l) -gt 0 ]; do
-            # Take first BATCH_SIZE files
             BATCH_FILES=$(head -n $BATCH_SIZE file_list.txt)
             
-            # Remove these files from the list for next iteration
             tail -n +$((BATCH_SIZE + 1)) file_list.txt > temp_list.txt 2>/dev/null || touch temp_list.txt
             mv temp_list.txt file_list.txt
             
-            # Add and commit this batch
             for file in $BATCH_FILES; do
               if [ -f "$file" ]; then
                 git add "$file"
               fi
             done
             
-            # Also add README.md only on first batch
             if [ $BATCH_NUM -eq 1 ] && [ -f "README.md" ]; then
               git add README.md
             fi
             
-            # Commit this batch
             git commit -m "[bot] Add video files batch $BATCH_NUM ($(echo $BATCH_FILES | wc -w) files)"
-            
-            # Push after each batch
             git push
             
             echo "✅ Batch $BATCH_NUM committed and pushed"
             BATCH_NUM=$((BATCH_NUM + 1))
-            
-            # Optional: small delay to avoid overwhelming GitHub
             sleep 2
           done
           
@@ -288,7 +318,6 @@ jobs:
       - name: Extract links from README.md
         id: extract
         run: |
-          # Check if README.md exists
           if [ ! -f "README.md" ]; then
             echo "❌ README.md not found!"
             exit 1
@@ -299,20 +328,12 @@ jobs:
           cat README.md
           echo "=========================================="
           
-          # Extract all download links from README.md
-          # Looking for markdown link format: [filename](url)
           grep -oP '\]\(\Khttps://[^)]+' README.md > extracted_links.txt 2>/dev/null || true
-          
-          # Also extract raw URLs as fallback
           grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' README.md >> extracted_links.txt 2>/dev/null || true
           
-          # Sort and deduplicate
           sort -u extracted_links.txt -o extracted_links.txt
-          
-          # Remove empty lines
           sed -i '/^$/d' extracted_links.txt
           
-          # Count links
           LINK_COUNT=$(wc -l < extracted_links.txt)
           echo "LINK_COUNT=$LINK_COUNT" >> $GITHUB_ENV
           
@@ -340,10 +361,8 @@ jobs:
               echo "$LINK"
               echo "=========================================="
               
-              # Download with wget
               wget --content-disposition --trust-server-names --max-redirect=5 "$LINK"
               
-              # Find the downloaded file
               DOWNLOADED_FILE=$(ls -1 | head -n 1)
               echo "Downloaded file: $DOWNLOADED_FILE"
               
@@ -373,10 +392,8 @@ jobs:
           CHAT_ID="${{ inputs.bale_chat_id }}"
           LINK_COUNT="${{ env.LINK_COUNT }}"
           
-          # Read video title
           VIDEO_TITLE=$(cat video_title.txt 2>/dev/null || echo "Unknown")
           
-          # Send header message with title
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
             -d "text=📦 Found ${LINK_COUNT} link(s) in README.%0A🎬 Video title: ${VIDEO_TITLE}%0A⬇️ Downloading and sending..."
@@ -405,7 +422,6 @@ jobs:
           
           cd ..
           
-          # Send completion message
           SENT_COUNT=$((FILE_NUM - 1))
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
