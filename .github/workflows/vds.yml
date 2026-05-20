@@ -160,7 +160,8 @@ jobs:
           VIDEO_TITLE=$(echo "$FILE" | sed 's/\.[^.]*$//')
           echo "VIDEO_TITLE=$VIDEO_TITLE" >> $GITHUB_ENV
           
-          SAFE_NAME=$(echo "$FILE" | sed 's/^[[:space:]]*//' | tr ' ' '_')
+          # Create a safe folder name (replace problematic characters with underscores)
+          SAFE_NAME=$(echo "$FILE" | sed 's/\.[^.]*$//' | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_')
           echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
 
           docker stop warp || true
@@ -209,15 +210,20 @@ jobs:
       - name: Generate README with Download Links
         run: |
           README_NAME="${{ env.README_NAME }}"
-          VIDEO_FOLDER="${{ env.SAFE_NAME }}"
           VIDEO_TITLE="${{ env.VIDEO_TITLE }}"
+          SAFE_NAME="${{ env.SAFE_NAME }}"
           
           echo "# 📥 Download Links - ${VIDEO_TITLE}" > "$README_NAME"
           echo "Generated on: $(date)" >> "$README_NAME"
           echo "" >> "$README_NAME"
           
+          # Use the safe folder name (no auto-detection needed since we created it)
+          VIDEO_FOLDER="$SAFE_NAME"
+          
+          echo "Video folder: $VIDEO_FOLDER"
+          
           # Add links to files in this video's folder
-          for file in ${VIDEO_FOLDER}/*; do
+          for file in "${VIDEO_FOLDER}"/*; do
             if [ -f "$file" ]; then
               filename=$(basename "$file")
               encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
@@ -248,21 +254,28 @@ jobs:
           path: readme_name.txt
           retention-days: 1
 
-      - name: Commit and Push in Batches of 5
+      - name: Commit and Push
         run: |
           VIDEO_FOLDER="${{ env.SAFE_NAME }}"
           README_FILE="${{ env.README_NAME }}"
           
-          # Add the video folder and its files
-          git add "$VIDEO_FOLDER"
-          # Add the README file at branch root
-          git add "$README_FILE"
+          if [ -d "$VIDEO_FOLDER" ]; then
+            git add "$VIDEO_FOLDER"
+            echo "Added video folder: $VIDEO_FOLDER"
+          fi
           
-          # Commit both together
-          git commit -m "[bot] Add video: ${{ env.VIDEO_TITLE }}"
-          git push
+          if [ -f "$README_FILE" ]; then
+            git add "$README_FILE"
+            echo "Added README: $README_FILE"
+          fi
           
-          echo "✅ Video folder '$VIDEO_FOLDER' and README committed and pushed"
+          if ! git diff --cached --quiet; then
+            git commit -m "[bot] Add video: ${{ env.VIDEO_TITLE }}"
+            git push
+            echo "✅ Committed and pushed successfully"
+          else
+            echo "No changes to commit"
+          fi
 
   # ============================================
   # JOB 2: Send files to Bale bot using README links
@@ -323,7 +336,7 @@ jobs:
           cat "$README_FILE"
           echo "=========================================="
           
-          # Extract all download links from README
+          # Extract all download links from README (using grep -oE for compatibility)
           grep -oE 'https://[^ )]+\.(z[0-9]+|zip)' "$README_FILE" > extracted_links.txt 2>/dev/null || true
           
           sort -u extracted_links.txt -o extracted_links.txt
