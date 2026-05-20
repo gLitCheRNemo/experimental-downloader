@@ -132,6 +132,7 @@ jobs:
         run: |
           QUALITY="${{ inputs.quality }}"
           
+          # Build format options for video
           if [ "$QUALITY" = "audio" ]; then
             FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
           elif [ "$QUALITY" = "best" ]; then
@@ -153,10 +154,11 @@ jobs:
           # Download video
           yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" $FORMAT_OPTS $OUTPUT_OPTS "${{ inputs.youtube_url }}"
           
-          # Download thumbnail
-          yt-dlp --write-thumbnail --skip-download --convert-thumbnails jpg \
+          # Download thumbnail separately (skip video download)
+          yt-dlp --skip-download --write-thumbnail --convert-thumbnails jpg \
             --output "thumbnail.%(ext)s" "${{ inputs.youtube_url }}"
 
+          # Find the downloaded video file
           FILE=$(ls -1 | grep -v thumbnail | head -n 1)
           FILE_NO_EXTENSION="${FILE%.*}"
           echo "FILE=$FILE" >> $GITHUB_ENV
@@ -166,19 +168,19 @@ jobs:
           VIDEO_TITLE=$(echo "$FILE" | sed 's/\.[^.]*$//')
           echo "VIDEO_TITLE=$VIDEO_TITLE" >> $GITHUB_ENV
           
-          # Create a safe folder name (replace problematic characters with underscores)
+          # Create a safe folder name
           SAFE_NAME=$(echo "$FILE" | sed 's/\.[^.]*$//' | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_')
           echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
           
-          # Convert thumbnail to JPEG if needed
+          # Handle thumbnail if it exists (convert webp to jpg using ffmpeg)
           if [ -f "thumbnail.webp" ]; then
-            sudo apt-get update
-            sudo apt-get install -y imagemagick
-            convert thumbnail.webp thumbnail.jpg
-          elif [ -f "thumbnail.png" ]; then
-            sudo apt-get update
-            sudo apt-get install -y imagemagick
-            convert thumbnail.png thumbnail.jpg
+            ffmpeg -i thumbnail.webp thumbnail.jpg -y
+            echo "THUMBNAIL_EXISTS=true" >> $GITHUB_ENV
+          elif [ -f "thumbnail.jpg" ]; then
+            echo "THUMBNAIL_EXISTS=true" >> $GITHUB_ENV
+          else
+            echo "THUMBNAIL_EXISTS=false" >> $GITHUB_ENV
+            echo "No thumbnail found"
           fi
           
           docker stop warp || true
@@ -278,6 +280,7 @@ jobs:
           retention-days: 1
 
       - name: Upload thumbnail as artifact
+        if: env.THUMBNAIL_EXISTS == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: video-thumbnail
@@ -334,10 +337,12 @@ jobs:
           path: .
 
       - name: Download thumbnail artifact
+        if: always()
         uses: actions/download-artifact@v4
         with:
           name: video-thumbnail
           path: .
+          continue-on-error: true
 
       - name: Get README name
         id: get_readme_name
