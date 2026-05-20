@@ -109,73 +109,8 @@ jobs:
           WEBSITE_URL: ${{ inputs.website_url }}
           OUTPUT_NAME: ${{ inputs.output_name }}
 
-      - name: Zip screenshot (single zip, no separate png file)
-        id: zip
-        run: |
-          OUTPUT_NAME="${{ inputs.output_name }}"
-          cd screenshot
-          
-          # Create zip containing the screenshot (no split)
-          zip -0 "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}.png"
-          
-          # Remove the original png file
-          rm -f "${OUTPUT_NAME}.png"
-          
-          cd ..
-          echo "ZIP created: screenshot/${OUTPUT_NAME}.zip"
-          echo "SINGLE_FILE=true" >> $GITHUB_ENV
-
-      - name: Split zip if needed (same as VDS/WDS)
+      - name: Split screenshot (single step - correct)
         id: split
-        run: |
-          PARTS_SIZE="${{ inputs.parts_size }}"
-          OUTPUT_NAME="${{ inputs.output_name }}"
-          FILE_PATH="screenshot/${OUTPUT_NAME}.zip"
-          
-          # Get file size in MB
-          FILE_SIZE=$(stat -c%s "$FILE_PATH")
-          FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
-          
-          echo "File size: ${FILE_SIZE_MB} MB"
-          echo "Split size: ${PARTS_SIZE} MB"
-          
-          cd screenshot
-          
-          if [ $FILE_SIZE_MB -le $PARTS_SIZE ]; then
-            echo "File is smaller than split size. Keeping as single ZIP."
-            # File is already a single zip, no action needed
-            echo "SINGLE_FILE=true" >> $GITHUB_ENV
-          else
-            echo "File is larger than split size. Creating split ZIP archive."
-            # Remove the existing single zip and create split version
-            rm -f "${OUTPUT_NAME}.zip"
-            # Re-zip the png (still in tmp location? need to re-create from backup)
-            # Actually we need the png again. Let's handle this differently:
-            cd ..
-            # Re-create from the original png (which we removed earlier - need to preserve it)
-            # Better approach: don't delete png until after split decision
-            echo "ERROR: Need to preserve png for splitting. Fixing..."
-            exit 1
-          fi
-          
-          cd ..
-          
-          # Alternative approach: split the existing zip directly
-          # This is cleaner
-          cd screenshot
-          
-          if [ $FILE_SIZE_MB -gt $PARTS_SIZE ]; then
-            echo "File is larger than split size. Creating split ZIP archive from existing zip."
-            # Remove the existing zip and re-create as split
-            rm -f "${OUTPUT_NAME}.zip"
-            # Re-zip the png (which is still there? It was deleted earlier)
-            # This is getting messy. Let me provide a cleaner version below.
-          fi
-          
-          cd ..
-
-      - name: Split screenshot (clean version)
-        id: split_clean
         run: |
           PARTS_SIZE="${{ inputs.parts_size }}"
           OUTPUT_NAME="${{ inputs.output_name }}"
