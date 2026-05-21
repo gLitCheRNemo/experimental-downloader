@@ -198,7 +198,7 @@ jobs:
           
           # Show password status
           if [ -n "$ZIP_PASSWORD" ]; then
-            echo "🔒 Password protection: ENABLED"
+            echo "🔒 Password protection: ENABLED (using default compression)"
           else
             echo "🔓 Password protection: DISABLED"
           fi
@@ -228,7 +228,7 @@ jobs:
             if [ $TOTAL_SIZE_MB -le $PARTS_SIZE ]; then
               echo "Creating single ZIP file (within size limit)"
               if [ -n "$ZIP_PASSWORD" ]; then
-                zip -0 -r -P "${ZIP_PASSWORD}" "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}_screenshots"
+                zip -r -P "${ZIP_PASSWORD}" "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}_screenshots"
                 echo "✅ Created password-protected: ${OUTPUT_NAME}.zip"
               else
                 zip -0 -r "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}_screenshots"
@@ -238,7 +238,7 @@ jobs:
             else
               echo "Creating split ZIP archive (exceeds size limit)"
               if [ -n "$ZIP_PASSWORD" ]; then
-                zip -0 -r -P "${ZIP_PASSWORD}" -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}_screenshots"
+                zip -r -P "${ZIP_PASSWORD}" -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}_screenshots"
                 echo "✅ Created password-protected split archive parts"
               else
                 zip -0 -r -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}_screenshots"
@@ -266,7 +266,7 @@ jobs:
               if [ $FILE_SIZE_MB -le $PARTS_SIZE ]; then
                 echo "Creating single ZIP file"
                 if [ -n "$ZIP_PASSWORD" ]; then
-                  zip -0 -P "${ZIP_PASSWORD}" "${OUTPUT_NAME}.zip" "${PNG_FILE}"
+                  zip -P "${ZIP_PASSWORD}" "${OUTPUT_NAME}.zip" "${PNG_FILE}"
                   echo "✅ Created password-protected: ${OUTPUT_NAME}.zip"
                 else
                   zip -0 "${OUTPUT_NAME}.zip" "${PNG_FILE}"
@@ -277,7 +277,7 @@ jobs:
               else
                 echo "Creating split ZIP archive"
                 if [ -n "$ZIP_PASSWORD" ]; then
-                  zip -0 -P "${ZIP_PASSWORD}" -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${PNG_FILE}"
+                  zip -P "${ZIP_PASSWORD}" -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${PNG_FILE}"
                   echo "✅ Created password-protected split archive parts"
                 else
                   zip -0 -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${PNG_FILE}"
@@ -313,7 +313,7 @@ jobs:
           echo "" >> README.md
           echo "## 📥 Download Links" >> README.md
           
-          # Add password notice if applicable
+          # Add password notice if applicable (NO actual password shown)
           if [ -n "$ZIP_PASSWORD" ]; then
             echo "" >> README.md
             echo "> 🔒 **This archive is password protected.** The password was provided when the workflow was run." >> README.md
@@ -495,7 +495,7 @@ jobs:
           LINK_COUNT="${{ env.LINK_COUNT }}"
           ZIP_PASSWORD="${{ inputs.password }}"
           
-          # Build initial message
+          # Build initial message (NO password shown, just indicator)
           if [ -n "$ZIP_PASSWORD" ]; then
             curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
               -d "chat_id=${CHAT_ID}" \
@@ -514,12 +514,8 @@ jobs:
               SIZE=$(stat -c%s "$FILE")
               SIZE_MB=$((SIZE / 1024 / 1024))
               
-              # Add password notice to individual file captions if applicable
-              if [ -n "$ZIP_PASSWORD" ]; then
-                CAPTION="${FILE} | ${SIZE_MB} MB | 🔒 Password protected"
-              else
-                CAPTION="${FILE} | ${SIZE_MB} MB"
-              fi
+              # Simple caption with NO password indicator
+              CAPTION="${FILE} | ${SIZE_MB}MB"
               
               echo "Sending file $FILE_NUM: $FILE (${SIZE_MB} MB)"
               
