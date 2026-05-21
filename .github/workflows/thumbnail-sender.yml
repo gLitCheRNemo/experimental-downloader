@@ -60,42 +60,65 @@ jobs:
         run: |
           URL="${{ inputs.youtube_url }}"
           
-          # Get video title
+          # Get video title and ID
           VIDEO_TITLE=$(yt-dlp --get-title "$URL")
+          VIDEO_ID=$(yt-dlp --get-id "$URL")
           echo "VIDEO_TITLE=$VIDEO_TITLE" >> $GITHUB_ENV
           echo "Video title: $VIDEO_TITLE"
+          echo "Video ID: $VIDEO_ID"
           
           # Create safe filename from video title
           SAFE_NAME=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_' | sed 's/^_//;s/_$//')
           echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
-          
-          # Extract video ID
-          VIDEO_ID=$(yt-dlp --get-id "$URL")
-          echo "Video ID: $VIDEO_ID"
           
           # Create thumbnails directory
           mkdir -p thumbnails
           
           THUMBNAIL_FILE=""
           
-          # Try maxresdefault.jpg (best quality)
+          # Method 1: Try maxresdefault.jpg (best quality, 1280x720)
+          echo "Trying maxresdefault.jpg..."
           if wget -q "https://img.youtube.com/vi/${VIDEO_ID}/maxresdefault.jpg" -O "thumbnails/${SAFE_NAME}.jpg" 2>/dev/null; then
             if [ -f "thumbnails/${SAFE_NAME}.jpg" ] && [ $(stat -c%s "thumbnails/${SAFE_NAME}.jpg") -gt 10000 ]; then
-              echo "✅ Downloaded maxresdefault.jpg (best quality)"
+              echo "✅ Downloaded maxresdefault.jpg"
               THUMBNAIL_FILE="${SAFE_NAME}.jpg"
             else
               rm -f "thumbnails/${SAFE_NAME}.jpg"
             fi
           fi
           
-          # Fallback to yt-dlp if direct download failed
+          # Method 2: Fallback to sddefault.jpg (640x480)
+          if [ -z "$THUMBNAIL_FILE" ]; then
+            echo "Trying sddefault.jpg..."
+            if wget -q "https://img.youtube.com/vi/${VIDEO_ID}/sddefault.jpg" -O "thumbnails/${SAFE_NAME}.jpg" 2>/dev/null; then
+              if [ -f "thumbnails/${SAFE_NAME}.jpg" ] && [ $(stat -c%s "thumbnails/${SAFE_NAME}.jpg") -gt 5000 ]; then
+                echo "✅ Downloaded sddefault.jpg"
+                THUMBNAIL_FILE="${SAFE_NAME}.jpg"
+              else
+                rm -f "thumbnails/${SAFE_NAME}.jpg"
+              fi
+            fi
+          fi
+          
+          # Method 3: Fallback to hqdefault.jpg (480x360)
+          if [ -z "$THUMBNAIL_FILE" ]; then
+            echo "Trying hqdefault.jpg..."
+            if wget -q "https://img.youtube.com/vi/${VIDEO_ID}/hqdefault.jpg" -O "thumbnails/${SAFE_NAME}.jpg" 2>/dev/null; then
+              if [ -f "thumbnails/${SAFE_NAME}.jpg" ] && [ $(stat -c%s "thumbnails/${SAFE_NAME}.jpg") -gt 2000 ]; then
+                echo "✅ Downloaded hqdefault.jpg"
+                THUMBNAIL_FILE="${SAFE_NAME}.jpg"
+              else
+                rm -f "thumbnails/${SAFE_NAME}.jpg"
+              fi
+            fi
+          fi
+          
+          # Method 4: Final fallback to yt-dlp (any format)
           if [ -z "$THUMBNAIL_FILE" ]; then
             echo "Falling back to yt-dlp thumbnail download..."
             cd thumbnails
             yt-dlp --skip-download --write-thumbnail --output "${SAFE_NAME}.%(ext)s" "$URL"
             cd ..
-            
-            # Find the downloaded file
             THUMBNAIL_FILE=$(ls thumbnails/${SAFE_NAME}.* 2>/dev/null | head -1)
             THUMBNAIL_FILE=$(basename "$THUMBNAIL_FILE")
           fi
@@ -111,7 +134,9 @@ jobs:
           echo "THUMBNAIL_FILE=$THUMBNAIL_FILE" >> $GITHUB_ENV
           echo "THUMBNAIL_EXT=$THUMBNAIL_EXT" >> $GITHUB_ENV
           
-          echo "✅ Downloaded: $THUMBNAIL_FILE ($THUMBNAIL_EXT)"
+          # Show file info
+          ls -la "thumbnails/$THUMBNAIL_FILE"
+          echo "✅ Downloaded: $THUMBNAIL_FILE ($THUMBNAIL_EXT, $(stat -c%s "thumbnails/$THUMBNAIL_FILE") bytes)"
 
       - name: Determine next README filename
         id: readme_name
@@ -145,7 +170,7 @@ jobs:
           echo "README_NAME=$README_NAME" >> $GITHUB_ENV
           echo "Using README file at branch root: $README_NAME"
 
-      - name: Generate README with Download Links
+      - name: Generate README with Download Link
         run: |
           README_NAME="${{ env.README_NAME }}"
           VIDEO_TITLE="${{ env.VIDEO_TITLE }}"
@@ -161,6 +186,7 @@ jobs:
           echo "- [Download $THUMBNAIL_FILE]($url)" >> "$README_NAME"
           
           echo "✅ Generated README: $README_NAME"
+          echo "Link: $url"
 
       - name: Save video title to file
         run: |
@@ -203,7 +229,7 @@ jobs:
           fi
 
   # ============================================
-  # JOB 2: Send thumbnail to Bale bot using README links
+  # JOB 2: Send thumbnail to Bale bot using README link
   # ============================================
   send-to-bot:
     runs-on: ubuntu-latest
@@ -261,8 +287,11 @@ jobs:
           cat "$README_FILE"
           echo "=========================================="
           
+          # Clear previous file
+          > extracted_link.txt
+          
           # Extract download link from README (looking for raw.githubusercontent.com URLs)
-          grep -oE 'https://raw\.githubusercontent\.com/[^ )]+' "$README_FILE" > extracted_link.txt 2>/dev/null || true
+          grep -oE 'https://raw\.githubusercontent\.com/[^ )]+' "$README_FILE" >> extracted_link.txt 2>/dev/null || true
           
           # Also try markdown link pattern
           grep -oP '\]\(\Khttps://[^)]+' "$README_FILE" >> extracted_link.txt 2>/dev/null || true
@@ -317,14 +346,25 @@ jobs:
           THUMBNAIL_FILENAME="${{ env.THUMBNAIL_FILENAME }}"
           
           echo "Sending thumbnail to Bale Bot..."
+          echo "Video title: $VIDEO_TITLE"
+          echo "Thumbnail file: $THUMBNAIL_FILENAME"
           
-          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendPhoto" \
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://tapi.bale.ai/bot${TOKEN}/sendPhoto" \
             -F "chat_id=${CHAT_ID}" \
             -F "photo=@${THUMBNAIL_FILENAME}" \
             -F "caption=🎬 *${VIDEO_TITLE}*" \
-            -F "parse_mode=Markdown"
+            -F "parse_mode=Markdown")
           
-          echo "✅ Thumbnail sent!"
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          if [ "$HTTP_CODE" -eq 200 ]; then
+            echo "✅ Thumbnail sent successfully!"
+          else
+            echo "❌ Failed to send thumbnail. HTTP code: $HTTP_CODE"
+            echo "Response: $BODY"
+            exit 1
+          fi
 
       - name: Show summary
         run: |
