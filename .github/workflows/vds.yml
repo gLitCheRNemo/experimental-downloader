@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -95,14 +95,14 @@ jobs:
           WARP_READY=false
           for i in {1..10}; do
             RESULT=$(curl -s --max-time 3 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
-
+            
             if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
               echo "WARP proxy is ready! (Took $i attempts)"
               echo "$RESULT" | grep -E "^(ip|warp|colo)="
               WARP_READY=true
               break
             fi
-
+            
             echo "Attempt $i/10 - WARP not ready, waiting 3s..."
             sleep 3
           done
@@ -122,12 +122,12 @@ jobs:
           export PATH="$DENO_INSTALL/bin:$PATH"
           echo "$DENO_INSTALL/bin" >> $GITHUB_PATH
           deno --version
-
+          
       - name: Download video
         id: download
         run: |
           QUALITY="${{ inputs.quality }}"
-
+          
           if [ "$QUALITY" = "audio" ]; then
             FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
           elif [ "$QUALITY" = "best" ]; then
@@ -135,7 +135,7 @@ jobs:
           else
             FORMAT_OPTS="-f bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}] --merge-output-format mp4"
           fi
-
+          
           mkdir -p tmpvideos
           cd tmpvideos
           yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" $FORMAT_OPTS "${{ inputs.youtube_url }}"
@@ -145,15 +145,15 @@ jobs:
           FILE_NO_EXTENSION="${FILE%.*}"
           echo "FILE=$FILE" >> $GITHUB_ENV
           echo "FILE_NO_EXTENSION=$FILE_NO_EXTENSION" >> $GITHUB_ENV
-
+          
           # Capture video title for header message
           VIDEO_TITLE=$(echo "$FILE" | sed 's/\.[^.]*$//')
           echo "VIDEO_TITLE=$VIDEO_TITLE" >> $GITHUB_ENV
-
+          
           # Create a safe folder name (replace problematic characters with underscores)
           SAFE_NAME=$(echo "$FILE" | sed 's/\.[^.]*$//' | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_')
           echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
-
+          
           # Extract video ID for thumbnail
           VIDEO_URL="${{ inputs.youtube_url }}"
           VIDEO_ID=$(echo "$VIDEO_URL" | grep -oP '(?<=v=)[^&]+|(?<=youtu\.be/)[^?]+|(?<=embed/)[^?]+|(?<=shorts/)[^?]+' | head -1)
@@ -168,15 +168,15 @@ jobs:
           VIDEO_ID="${{ env.VIDEO_ID }}"
           SAFE_NAME="${{ env.SAFE_NAME }}"
           VIDEO_FOLDER="${{ env.SAFE_NAME }}"
-
+          
           mkdir -p "$VIDEO_FOLDER"
-
+          
           echo "=========================================="
           echo "Downloading thumbnail for video ID: $VIDEO_ID"
           echo "=========================================="
-
+          
           THUMBNAIL_DOWNLOADED=false
-
+          
           # Try maxresdefault.jpg (best quality)
           echo "Trying maxresdefault.jpg..."
           if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/maxresdefault.jpg" -O "${VIDEO_FOLDER}/thumbnail.jpg" 2>/dev/null; then
@@ -187,7 +187,7 @@ jobs:
               rm -f "${VIDEO_FOLDER}/thumbnail.jpg"
             fi
           fi
-
+          
           # Try sddefault.jpg
           if [ "$THUMBNAIL_DOWNLOADED" = false ]; then
             echo "Trying sddefault.jpg..."
@@ -200,7 +200,7 @@ jobs:
               fi
             fi
           fi
-
+          
           # Try hqdefault.jpg
           if [ "$THUMBNAIL_DOWNLOADED" = false ]; then
             echo "Trying hqdefault.jpg..."
@@ -213,7 +213,7 @@ jobs:
               fi
             fi
           fi
-
+          
           # Set flag for later steps
           if [ "$THUMBNAIL_DOWNLOADED" = true ]; then
             echo "THUMBNAIL_EXISTS=true" >> $GITHUB_ENV
@@ -231,7 +231,7 @@ jobs:
           cd tmpvideos
           zip -0 -s "${{ inputs.parts_size }}m" "../${VIDEO_FOLDER}/${SAFE_NAME}.zip" "$FILE"
           cd ..
-
+          
           docker stop warp || true
 
       - name: Determine next README filename
@@ -254,15 +254,15 @@ jobs:
               fi
             fi
           done
-
+          
           NEXT_NUM=$((HIGHEST + 1))
-
+          
           if [ $NEXT_NUM -eq 1 ]; then
             README_NAME="README.md"
           else
             README_NAME="README${NEXT_NUM}.md"
           fi
-
+          
           echo "README_NAME=$README_NAME" >> $GITHUB_ENV
           echo "Using README file at branch root: $README_NAME"
 
@@ -271,16 +271,16 @@ jobs:
           README_NAME="${{ env.README_NAME }}"
           VIDEO_TITLE="${{ env.VIDEO_TITLE }}"
           SAFE_NAME="${{ env.SAFE_NAME }}"
-
+          
           echo "# 📥 Download Links - ${VIDEO_TITLE}" > "$README_NAME"
           echo "Generated on: $(date)" >> "$README_NAME"
           echo "" >> "$README_NAME"
-
+          
           # Use the safe folder name
           VIDEO_FOLDER="$SAFE_NAME"
-
+          
           echo "Video folder: $VIDEO_FOLDER"
-
+          
           # Add links to files in this video's folder
           for file in "${VIDEO_FOLDER}"/*; do
             if [ -f "$file" ]; then
@@ -325,17 +325,17 @@ jobs:
         run: |
           VIDEO_FOLDER="${{ env.SAFE_NAME }}"
           README_FILE="${{ env.README_NAME }}"
-
+          
           if [ -d "$VIDEO_FOLDER" ]; then
             git add "$VIDEO_FOLDER"
             echo "Added video folder: $VIDEO_FOLDER"
           fi
-
+          
           if [ -f "$README_FILE" ]; then
             git add "$README_FILE"
             echo "Added README: $README_FILE"
           fi
-
+          
           if ! git diff --cached --quiet; then
             git commit -m "[bot] Add video: ${{ env.VIDEO_TITLE }}"
             git push
@@ -351,7 +351,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: download-and-release
     if: always() && needs.download-and-release.result == 'success'
-
+    
     steps:
       - name: Mask sensitive inputs
         run: |
@@ -395,37 +395,37 @@ jobs:
           README_FILE="${{ env.README_NAME }}"
           BRANCH_NAME="videos"
           REPO="${{ github.repository }}"
-
+          
           README_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${README_FILE}"
           echo "Fetching README from: $README_URL"
-
+          
           curl -L -o "$README_FILE" "$README_URL"
-
+          
           if [ ! -f "$README_FILE" ]; then
             echo "❌ Could not fetch $README_FILE from branch root: $BRANCH_NAME"
             exit 1
           fi
-
+          
           echo "README file contents:"
           echo "=========================================="
           cat "$README_FILE"
           echo "=========================================="
-
+          
           # Extract all download links from README
           grep -oE 'https://[^ )]+\.(z[0-9]+|zip)' "$README_FILE" > extracted_links.txt 2>/dev/null || true
-
+          
           sort -u extracted_links.txt -o extracted_links.txt
           sed -i '/^$/d' extracted_links.txt
-
+          
           LINK_COUNT=$(wc -l < extracted_links.txt)
           echo "LINK_COUNT=$LINK_COUNT" >> $GITHUB_ENV
-
+          
           echo ""
           echo "Found $LINK_COUNT links in $README_FILE:"
           echo "=========================================="
           cat extracted_links.txt
           echo "=========================================="
-
+          
           if [ "$LINK_COUNT" -eq 0 ]; then
             echo "❌ No download links found in README"
             exit 1
@@ -435,7 +435,7 @@ jobs:
         run: |
           mkdir -p downloaded_files
           cd downloaded_files
-
+          
           LINK_NUM=1
           while IFS= read -r LINK; do
             if [ -n "$LINK" ]; then
@@ -443,12 +443,12 @@ jobs:
               echo "Downloading file $LINK_NUM of ${{ env.LINK_COUNT }} from:"
               echo "$LINK"
               echo "=========================================="
-
+              
               wget --content-disposition --trust-server-names --max-redirect=5 "$LINK"
-
+              
               DOWNLOADED_FILE=$(ls -1 | head -n 1)
               echo "Downloaded file: $DOWNLOADED_FILE"
-
+              
               if [ -f "$DOWNLOADED_FILE" ] && [ -s "$DOWNLOADED_FILE" ]; then
                 SIZE=$(stat -c%s "$DOWNLOADED_FILE")
                 SIZE_MB=$((SIZE / 1024 / 1024))
@@ -458,14 +458,14 @@ jobs:
                 echo "❌ Failed to download from: $LINK"
                 echo "unknown:FAILED:0" >> ../download_status.txt
               fi
-
+              
               LINK_NUM=$((LINK_NUM + 1))
               echo ""
             fi
           done < ../extracted_links.txt
-
+          
           cd ..
-
+          
           echo "Files in downloaded_files directory:"
           ls -lh downloaded_files/
 
@@ -478,13 +478,13 @@ jobs:
           CHAT_ID="${{ inputs.bale_chat_id }}"
           LINK_COUNT="${{ env.LINK_COUNT }}"
           VIDEO_TITLE=$(cat video_title.txt 2>/dev/null || echo "Unknown")
-
+          
           # Build caption with actual newlines (not %0A)
           CAPTION="🎬 *${VIDEO_TITLE}*
-
+          
 📦 Found ${LINK_COUNT} link(s)
 ⬇️ Downloading and sending..."
-
+          
           # Send thumbnail with caption (ONE message with image + text)
           if [ -f "thumbnail.jpg" ]; then
             echo "Sending thumbnail with caption..."
@@ -500,32 +500,32 @@ jobs:
               -d "text=🎬 *${VIDEO_TITLE}%0A%0A📦 Found ${LINK_COUNT} link(s)%0A⬇️ Downloading and sending..." \
               -d "parse_mode=Markdown"
           fi
-
+          
           # Send all downloaded files
           cd downloaded_files
-
+          
           FILE_NUM=1
           for FILE in *; do
             if [ -f "$FILE" ] && [ -s "$FILE" ]; then
               SIZE=$(stat -c%s "$FILE")
               SIZE_MB=$((SIZE / 1024 / 1024))
-
+              
               echo "Sending file $FILE_NUM: $FILE (${SIZE_MB}MB)"
-
+              
               curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
                 -F "chat_id=${CHAT_ID}" \
                 -F "document=@${FILE}" \
                 -F "caption=${FILE} | ${SIZE_MB}MB"
-
+              
               echo "✅ Sent $FILE"
-
+              
               FILE_NUM=$((FILE_NUM + 1))
               sleep 1
             fi
           done
-
+          
           cd ..
-
+          
           SENT_COUNT=$((FILE_NUM - 1))
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
