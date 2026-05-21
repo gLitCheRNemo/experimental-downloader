@@ -1,37 +1,17 @@
-name: Screenshot Sender
+name: Thumbnail Downloader
 
 on:
   workflow_dispatch:
     inputs:
-      website_url:
-        description: '🔗 Website URL to screenshot'
+      youtube_url:
+        description: '🔗 YouTube video URL'
         required: true
         type: string
       output_name:
         description: '📝 Output file name (without extension)'
-        required: true
-        default: 'screenshot'
-        type: string
-      full_page:
-        description: '📄 Take full-page screenshot (scrolls entire page)'
-        required: false
-        default: true
-        type: boolean
-      screenshot_count:
-        description: '🔢 Number of screenshots to take (1-20)'
-        required: false
-        default: '1'
-        type: string
-      delay_seconds:
-        description: '⏱️ Delay between screenshots (seconds)'
-        required: false
-        default: '0'
-        type: string
-      parts_size:
-        description: '🫙 Parts size (MB)'
         required: false
         type: string
-        default: '45'
+        default: 'thumbnail'
       bale_token:
         description: '🤖 Bale Bot Token (for sending files)'
         required: true
@@ -42,10 +22,7 @@ on:
         type: string
 
 jobs:
-  # ============================================
-  # JOB 1: Take screenshots and create README
-  # ============================================
-  screenshot-and-release:
+  download-thumbnail:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -57,302 +34,163 @@ jobs:
           persist-credentials: true
           fetch-depth: 0
 
-      - name: Prepare screenshot branch
+      - name: Setup FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg curl
+          ffmpeg -version
+
+      - name: Setup yt-dlp
+        run: |
+          pip install yt-dlp --upgrade
+
+      - name: Download thumbnail (fixed with fallback methods)
+        id: download_thumbnail
+        run: |
+          mkdir -p thumbnails
+          cd thumbnails
+          
+          OUTPUT_NAME="${{ inputs.output_name }}"
+          if [ -z "$OUTPUT_NAME" ]; then
+            OUTPUT_NAME="thumbnail"
+          fi
+          
+          echo "Attempting to download thumbnail for: ${{ inputs.youtube_url }}"
+          
+          # Try yt-dlp first
+          yt-dlp --skip-download \
+                 --write-thumbnail \
+                 --convert-thumbnails jpg \
+                 --ppa "ThumbnailsConvertor:-qmin 1 -q:v 1" \
+                 --output "${OUTPUT_NAME}.%(ext)s" \
+                 "${{ inputs.youtube_url }}" || true
+          
+          # Fallback: direct URL extraction using video ID
+          if [ ! -f "${OUTPUT_NAME}.jpg" ] && [ ! -f "${OUTPUT_NAME}.webp" ]; then
+            echo "yt-dlp method failed. Trying direct URL extraction..."
+            
+            # Extract video ID
+            VIDEO_ID=$(echo "${{ inputs.youtube_url }}" | grep -oE '(v=|\/)([a-zA-Z0-9_-]{11})' | head -1 | sed 's/^v=//' | sed 's/^\///')
+            
+            if [ -n "$VIDEO_ID" ]; then
+              echo "Video ID: $VIDEO_ID"
+              
+              # Try each quality level in order
+              # maxresdefault (best, but not always available)
+              curl -L -o "${OUTPUT_NAME}.jpg" "https://img.youtube.com/vi/${VIDEO_ID}/maxresdefault.jpg" 2>/dev/null
+              if [ -f "${OUTPUT_NAME}.jpg" ] && [ $(stat -c%s "${OUTPUT_NAME}.jpg") -gt 10000 ]; then
+                echo "✅ Downloaded maxresdefault.jpg"
+              else
+                # sddefault (good quality)
+                curl -L -o "${OUTPUT_NAME}.jpg" "https://img.youtube.com/vi/${VIDEO_ID}/sddefault.jpg" 2>/dev/null
+                if [ -f "${OUTPUT_NAME}.jpg" ] && [ $(stat -c%s "${OUTPUT_NAME}.jpg") -gt 5000 ]; then
+                  echo "✅ Downloaded sddefault.jpg"
+                else
+                  # hqdefault (medium quality)
+                  curl -L -o "${OUTPUT_NAME}.jpg" "https://img.youtube.com/vi/${VIDEO_ID}/hqdefault.jpg" 2>/dev/null
+                  if [ -f "${OUTPUT_NAME}.jpg" ] && [ $(stat -c%s "${OUTPUT_NAME}.jpg") -gt 3000 ]; then
+                    echo "✅ Downloaded hqdefault.jpg"
+                  else
+                    # mqdefault (lowest quality)
+                    curl -L -o "${OUTPUT_NAME}.jpg" "https://img.youtube.com/vi/${VIDEO_ID}/mqdefault.jpg" 2>/dev/null
+                    echo "✅ Downloaded mqdefault.jpg"
+                  fi
+                fi
+              fi
+            fi
+          fi
+          
+          # Convert WebP to JPG if needed
+          if [ -f "${OUTPUT_NAME}.webp" ]; then
+            echo "Converting WebP to JPG..."
+            ffmpeg -i "${OUTPUT_NAME}.webp" -q:v 1 "${OUTPUT_NAME}.jpg" -y
+            rm -f "${OUTPUT_NAME}.webp"
+          fi
+          
+          # Verify success
+          if [ -f "${OUTPUT_NAME}.jpg" ]; then
+            FILE_SIZE=$(stat -c%s "${OUTPUT_NAME}.jpg")
+            FILE_SIZE_KB=$((FILE_SIZE / 1024))
+            echo "✅ Thumbnail downloaded successfully: ${OUTPUT_NAME}.jpg (${FILE_SIZE_KB} KB)"
+            echo "THUMBNAIL_EXISTS=true" >> $GITHUB_ENV
+            echo "THUMBNAIL_FILE=${OUTPUT_NAME}.jpg" >> $GITHUB_ENV
+          else
+            echo "❌ FAILED: No thumbnail could be downloaded"
+            echo "THUMBNAIL_EXISTS=false" >> $GITHUB_ENV
+            exit 1
+          fi
+          
+          cd ..
+
+      - name: Generate README with Download Links
+        if: env.THUMBNAIL_EXISTS == 'true'
+        run: |
+          rm -f README.md
+          
+          echo "# 🖼️ Thumbnail Download Link" > README.md
+          echo "Generated on: $(date)" >> README.md
+          echo "" >> README.md
+          echo "## 📥 Download Link" >> README.md
+          
+          cd thumbnails
+          for file in *; do
+            if [ -f "$file" ]; then
+              filename=$(basename "$file")
+              encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
+              url="https://github.com/${{ github.repository }}/raw/thumbnails/thumbnails/$encoded_filename"
+              echo "- [Download $filename]($url)" >> ../README.md
+            fi
+          done
+          cd ..
+
+      - name: Commit and Push
+        if: env.THUMBNAIL_EXISTS == 'true'
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git fetch origin
-
-          if git ls-remote --exit-code --heads origin screenshot; then
-            git checkout screenshot
-            git pull origin screenshot
+          
+          # Check if thumbnails branch exists, create if not
+          if git ls-remote --exit-code --heads origin thumbnails; then
+            git checkout thumbnails
+            git pull origin thumbnails
           else
-            git checkout --orphan screenshot
+            git checkout --orphan thumbnails
             git rm -rf . || true
-            mkdir -p screenshot
-            git commit --allow-empty -m "[bot] Initialize screenshot branch"
-            git push --set-upstream origin screenshot
-          fi
-
-      - name: Setup Puppeteer
-        run: |
-          mkdir -p screenshot_script
-          cd screenshot_script
-          npm init -y
-          npm install puppeteer
-
-      - name: Take screenshot(s)
-        id: screenshot
-        run: |
-          OUTPUT_NAME="${{ inputs.output_name }}"
-          WEBSITE_URL="${{ inputs.website_url }}"
-          FULL_PAGE="${{ inputs.full_page }}"
-          SCREENSHOT_COUNT="${{ inputs.screenshot_count }}"
-          DELAY_SECONDS="${{ inputs.delay_seconds }}"
-          
-          mkdir -p screenshot
-          
-          cd screenshot_script
-          node << 'EOF'
-          const puppeteer = require('puppeteer');
-          const fs = require('fs');
-          const path = require('path');
-          
-          (async () => {
-            const browser = await puppeteer.launch({
-              args: ['--no-sandbox', '--disable-setuid-sandbox'],
-              headless: 'new'
-            });
-            const page = await browser.newPage();
-            
-            await page.setViewport({ width: 1920, height: 1080 });
-            
-            const url = process.env.WEBSITE_URL;
-            const outputName = process.env.OUTPUT_NAME;
-            const fullPage = process.env.FULL_PAGE === 'true';
-            const screenshotCount = parseInt(process.env.SCREENSHOT_COUNT, 10) || 1;
-            const delaySeconds = parseInt(process.env.DELAY_SECONDS, 10) || 0;
-            
-            console.log(`Navigating to: ${url}`);
-            console.log(`Full-page mode: ${fullPage}`);
-            console.log(`Screenshots to take: ${screenshotCount}`);
-            console.log(`Delay between screenshots: ${delaySeconds}s`);
-            
-            await page.goto(url, { waitUntil: 'networkidle2' });
-            
-            console.log('Waiting 5 seconds for initial page load...');
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            
-            const screenshotDir = path.join('..', 'screenshot');
-            if (!fs.existsSync(screenshotDir)) {
-              fs.mkdirSync(screenshotDir, { recursive: true });
-            }
-            
-            for (let i = 1; i <= screenshotCount; i++) {
-              let filename;
-              if (screenshotCount === 1) {
-                filename = `${outputName}.png`;
-              } else {
-                filename = `${outputName}_${i}.png`;
-              }
-              const filePath = path.join(screenshotDir, filename);
-              
-              console.log(`Taking screenshot ${i}/${screenshotCount}: ${filename}`);
-              
-              if (fullPage) {
-                await page.screenshot({ path: filePath, fullPage: true });
-              } else {
-                await page.screenshot({ path: filePath, fullPage: false });
-              }
-              
-              console.log(`  ✅ Saved: ${filename}`);
-              
-              if (i < screenshotCount && delaySeconds > 0) {
-                console.log(`  ⏱️  Waiting ${delaySeconds} seconds...`);
-                await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
-              }
-            }
-            
-            console.log(`\n✅ All ${screenshotCount} screenshot(s) completed!`);
-            await browser.close();
-          })().catch(err => {
-            console.error('Error:', err);
-            process.exit(1);
-          });
-          EOF
-          
-          cd ..
-          
-          # Count screenshots and save to GITHUB_ENV
-          SCREENSHOT_COUNT_ACTUAL=$(ls -1 screenshot/*.png 2>/dev/null | wc -l)
-          echo "SCREENSHOT_COUNT_ACTUAL=$SCREENSHOT_COUNT_ACTUAL" >> $GITHUB_ENV
-          echo "✅ Created $SCREENSHOT_COUNT_ACTUAL screenshot(s)"
-        env:
-          WEBSITE_URL: ${{ inputs.website_url }}
-          OUTPUT_NAME: ${{ inputs.output_name }}
-          FULL_PAGE: ${{ inputs.full_page }}
-          SCREENSHOT_COUNT: ${{ inputs.screenshot_count }}
-          DELAY_SECONDS: ${{ inputs.delay_seconds }}
-
-      # ============================================
-      # Split screenshot(s) into zip archive(s)
-      # ============================================
-      - name: Split screenshot(s) into archives
-        id: split
-        run: |
-          cd screenshot
-          
-          OUTPUT_NAME="${{ inputs.output_name }}"
-          PARTS_SIZE="${{ inputs.parts_size }}"
-          SCREENSHOT_COUNT="${{ env.SCREENSHOT_COUNT_ACTUAL }}"
-          
-          echo "SCREENSHOT_COUNT from env: $SCREENSHOT_COUNT"
-          echo "Found PNG file(s) in screenshot folder:"
-          ls -la *.png 2>/dev/null || echo "No PNG files found"
-          
-          # Convert to integer and compare
-          if [ "$SCREENSHOT_COUNT" -gt 1 ] 2>/dev/null; then
-            echo "=========================================="
-            echo "Multiple screenshots detected ($SCREENSHOT_COUNT files)"
-            echo "Creating folder: ${OUTPUT_NAME}_screenshots"
-            echo "=========================================="
-            
-            # Create a folder with the output name
-            mkdir -p "${OUTPUT_NAME}_screenshots"
-            
-            # Move all PNG files into that folder
-            mv *.png "${OUTPUT_NAME}_screenshots/"
-            
-            echo "Files moved to folder:"
-            ls -la "${OUTPUT_NAME}_screenshots/"
-            
-            # Calculate total size of the folder
-            TOTAL_SIZE=$(du -sb "${OUTPUT_NAME}_screenshots" | cut -f1)
-            TOTAL_SIZE_MB=$((TOTAL_SIZE / 1024 / 1024))
-            echo "Total combined size: ${TOTAL_SIZE_MB} MB"
-            echo "Split size limit: ${PARTS_SIZE} MB"
-            
-            if [ $TOTAL_SIZE_MB -le $PARTS_SIZE ]; then
-              echo "Creating single ZIP file (within size limit)"
-              zip -0 -r "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}_screenshots"
-              echo "✅ Created: ${OUTPUT_NAME}.zip"
-              echo "SINGLE_FILE=true" >> $GITHUB_ENV
-            else
-              echo "Creating split ZIP archive (exceeds size limit)"
-              zip -0 -r -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}_screenshots"
-              echo "✅ Created split archive parts"
-              echo "SINGLE_FILE=false" >> $GITHUB_ENV
-            fi
-            
-            # Remove the folder after zipping
-            rm -rf "${OUTPUT_NAME}_screenshots"
-            echo "Removed temporary folder"
-            
-          else
-            echo "=========================================="
-            echo "Single screenshot detected"
-            echo "=========================================="
-            
-            PNG_FILE="${OUTPUT_NAME}.png"
-            if [ -f "$PNG_FILE" ]; then
-              FILE_SIZE=$(stat -c%s "$PNG_FILE")
-              FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
-              echo "File size: ${FILE_SIZE_MB} MB"
-              echo "Split size limit: ${PARTS_SIZE} MB"
-              
-              if [ $FILE_SIZE_MB -le $PARTS_SIZE ]; then
-                echo "Creating single ZIP file"
-                zip -0 "${OUTPUT_NAME}.zip" "${PNG_FILE}"
-                rm -f "${PNG_FILE}"
-                echo "SINGLE_FILE=true" >> $GITHUB_ENV
-              else
-                echo "Creating split ZIP archive"
-                zip -0 -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${PNG_FILE}"
-                rm -f "${PNG_FILE}"
-                echo "SINGLE_FILE=false" >> $GITHUB_ENV
-              fi
-            else
-              echo "ERROR: PNG file $PNG_FILE not found!"
-              exit 1
-            fi
+            mkdir -p thumbnails
+            git commit --allow-empty -m "[bot] Initialize thumbnails branch"
+            git push --set-upstream origin thumbnails
           fi
           
-          # Show what files were created
-          echo ""
-          echo "Files in screenshot folder after zipping:"
-          ls -la
+          # Add files
+          git add README.md thumbnails/
           
-          cd ..
+          # Commit and push
+          git commit -m "[bot] Add thumbnail: ${{ inputs.output_name }}"
+          git push
+          
+          echo "✅ Committed and pushed successfully"
 
-      # ============================================
-      # Generate README (NO details section)
-      # ============================================
-      - name: Generate README with Download Links
-        run: |
-          rm -f README.md
-          
-          echo "# 📸 Screenshot Download Links" > README.md
-          echo "Generated on: $(date)" >> README.md
-          echo "" >> README.md
-          echo "## 📥 Download Links" >> README.md
-          
-          # Check if screenshot folder has any files
-          if [ -d "screenshot" ] && [ "$(ls -A screenshot)" ]; then
-            for file in screenshot/*; do
-              if [ -f "$file" ]; then
-                filename=$(basename "$file")
-                encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
-                url="https://github.com/${{ github.repository }}/raw/screenshot/screenshot/$encoded_filename"
-                echo "- [Download $filename]($url)" >> README.md
-              fi
-            done
-          else
-            echo "No screenshot files found to link." >> README.md
-          fi
-
-      - name: Commit and Push in Batches of 5
-        run: |
-          # Check if screenshot folder exists and has files
-          if [ ! -d "screenshot" ] || [ -z "$(ls -A screenshot)" ]; then
-            echo "No files to commit"
-            exit 0
-          fi
-          
-          ls screenshot/* 2>/dev/null > file_list.txt || true
-          
-          TOTAL_FILES=$(cat file_list.txt | wc -l)
-          echo "Total files to commit: $TOTAL_FILES"
-          
-          if [ "$TOTAL_FILES" -eq 0 ]; then
-            echo "No new files to commit"
-            exit 0
-          fi
-          
-          BATCH_SIZE=5
-          BATCH_NUM=1
-          
-          while [ $(cat file_list.txt | wc -l) -gt 0 ]; do
-            BATCH_FILES=$(head -n $BATCH_SIZE file_list.txt)
-            
-            tail -n +$((BATCH_SIZE + 1)) file_list.txt > temp_list.txt 2>/dev/null || touch temp_list.txt
-            mv temp_list.txt file_list.txt
-            
-            for file in $BATCH_FILES; do
-              if [ -f "$file" ]; then
-                git add "$file"
-              fi
-            done
-            
-            if [ $BATCH_NUM -eq 1 ] && [ -f "README.md" ]; then
-              git add README.md
-            fi
-            
-            git commit -m "[bot] Add screenshot files batch $BATCH_NUM ($(echo $BATCH_FILES | wc -w) files)"
-            git push
-            
-            echo "✅ Batch $BATCH_NUM committed and pushed"
-            BATCH_NUM=$((BATCH_NUM + 1))
-            sleep 2
-          done
-          
-          echo "✅ All $TOTAL_FILES files committed and pushed in batches"
-          rm -f file_list.txt temp_list.txt
-
-      - name: Upload README as artifact for next job
+      - name: Upload README as artifact
+        if: env.THUMBNAIL_EXISTS == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: readme-file
           path: README.md
           retention-days: 1
 
-  # ============================================
-  # JOB 2: Send files to Bale bot using README links
-  # FIXED: Using the proven extractor from send-to-bot.yml
-  # ============================================
+      - name: Upload thumbnail as artifact
+        if: env.THUMBNAIL_EXISTS == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: thumbnail-file
+          path: thumbnails/
+          retention-days: 1
+
   send-to-bot:
     runs-on: ubuntu-latest
-    needs: screenshot-and-release
-    if: always() && needs.screenshot-and-release.result == 'success'
+    needs: download-thumbnail
+    if: always() && needs.download-thumbnail.result == 'success'
     
     steps:
       - name: Mask sensitive inputs
@@ -360,13 +198,19 @@ jobs:
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
 
-      - name: Download README artifact from previous job
+      - name: Download README artifact
         uses: actions/download-artifact@v4
         with:
           name: readme-file
           path: .
 
-      - name: Extract links from README.md (fixed method)
+      - name: Download thumbnail artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: thumbnail-file
+          path: thumbnails/
+
+      - name: Extract links from README.md
         id: extract
         run: |
           if [ ! -f "README.md" ]; then
@@ -375,137 +219,50 @@ jobs:
           fi
           
           echo "README.md contents:"
-          echo "=========================================="
           cat README.md
-          echo "=========================================="
           
-          # Clear previous file
+          # Extract links using both patterns
           > extracted_links.txt
-          
-          # Extract links using both patterns (from send-to-bot.yml)
           grep -oP '\]\(\Khttps://[^)]+' README.md >> extracted_links.txt 2>/dev/null || true
           grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' README.md >> extracted_links.txt 2>/dev/null || true
           
-          # Clean up and sort
           sort -u extracted_links.txt -o extracted_links.txt
           sed -i '/^$/d' extracted_links.txt
           
           LINK_COUNT=$(wc -l < extracted_links.txt)
           echo "LINK_COUNT=$LINK_COUNT" >> $GITHUB_ENV
           
-          echo ""
-          echo "Found $LINK_COUNT links in README.md:"
-          echo "=========================================="
+          echo "Found $LINK_COUNT links:"
           cat extracted_links.txt
-          echo "=========================================="
           
           if [ "$LINK_COUNT" -eq 0 ]; then
-            echo "❌ No download links found in README.md"
+            echo "❌ No download links found"
             exit 1
           fi
 
-      - name: Download files using wget
-        run: |
-          mkdir -p downloaded_files
-          cd downloaded_files
-          
-          LINK_NUM=1
-          while IFS= read -r LINK; do
-            if [ -n "$LINK" ]; then
-              echo "=========================================="
-              echo "Downloading file $LINK_NUM of ${{ env.LINK_COUNT }} from:"
-              echo "$LINK"
-              echo "=========================================="
-              
-              wget --content-disposition --trust-server-names --max-redirect=5 "$LINK"
-              
-              DOWNLOADED_FILE=$(ls -1 | head -n 1)
-              echo "Downloaded file: $DOWNLOADED_FILE"
-              
-              if [ -f "$DOWNLOADED_FILE" ] && [ -s "$DOWNLOADED_FILE" ]; then
-                SIZE=$(stat -c%s "$DOWNLOADED_FILE")
-                SIZE_MB=$((SIZE / 1024 / 1024))
-                echo "✅ Downloaded: $DOWNLOADED_FILE (${SIZE_MB} MB)"
-                echo "$DOWNLOADED_FILE:SUCCESS:$SIZE" >> ../download_status.txt
-              else
-                echo "❌ Failed to download from: $LINK"
-                echo "unknown:FAILED:0" >> ../download_status.txt
-              fi
-              
-              LINK_NUM=$((LINK_NUM + 1))
-              echo ""
-            fi
-          done < ../extracted_links.txt
-          
-          cd ..
-          
-          echo "Files in downloaded_files directory:"
-          ls -lh downloaded_files/
-
-      - name: Send files to Bale bot
+      - name: Download and send thumbnail
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
-          LINK_COUNT="${{ env.LINK_COUNT }}"
           
-          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-            -d "chat_id=${CHAT_ID}" \
-            -d "text=📸 Found ${LINK_COUNT} file part(s) in README.%0A⬇️ Downloading and sending..."
+          # Download the file
+          LINK=$(cat extracted_links.txt | head -1)
+          echo "Downloading from: $LINK"
+          wget --content-disposition --trust-server-names "$LINK"
           
-          cd downloaded_files
+          # Find downloaded file
+          DOWNLOADED_FILE=$(ls -1 | head -1)
+          echo "Downloaded: $DOWNLOADED_FILE"
           
-          FILE_NUM=1
-          for FILE in *; do
-            if [ -f "$FILE" ] && [ -s "$FILE" ]; then
-              SIZE=$(stat -c%s "$FILE")
-              SIZE_MB=$((SIZE / 1024 / 1024))
-              
-              echo "Sending file $FILE_NUM: $FILE (${SIZE_MB} MB)"
-              
-              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
-                -F "chat_id=${CHAT_ID}" \
-                -F "document=@${FILE}" \
-                -F "caption=${FILE} | ${SIZE_MB} MB"
-              
-              echo "✅ Sent $FILE"
-              
-              FILE_NUM=$((FILE_NUM + 1))
-              sleep 1
-            fi
-          done
+          # Send to Bale
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendPhoto" \
+            -F "chat_id=${CHAT_ID}" \
+            -F "photo=@${DOWNLOADED_FILE}" \
+            -F "caption=🖼️ Thumbnail downloaded successfully!%0A📁 File: ${DOWNLOADED_FILE}"
           
-          cd ..
-          
-          SENT_COUNT=$((FILE_NUM - 1))
-          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-            -d "chat_id=${CHAT_ID}" \
-            -d "text=✅ Done! Sent ${SENT_COUNT} file(s) from ${LINK_COUNT} link(s)."
-
-      - name: Show summary
-        run: |
-          echo "## 📊 Screenshot Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| URL | ${{ inputs.website_url }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Full-page mode | ${{ inputs.full_page }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Screenshots requested | ${{ inputs.screenshot_count }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Delay between shots | ${{ inputs.delay_seconds }} seconds |" >> $GITHUB_STEP_SUMMARY
-          echo "| Links found in README | ${{ env.LINK_COUNT }} |" >> $GITHUB_STEP_SUMMARY
-          if [ -f "download_status.txt" ]; then
-            SUCCESS_COUNT=$(grep -c ":SUCCESS:" download_status.txt || echo "0")
-            FAILED_COUNT=$(grep -c ":FAILED:" download_status.txt || echo "0")
-            echo "| Successfully downloaded | $SUCCESS_COUNT |" >> $GITHUB_STEP_SUMMARY
-            echo "| Failed downloads | $FAILED_COUNT |" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Extracted links from README.md:" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat extracted_links.txt >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "✅ Sent to Bale"
 
       - name: Cleanup
         run: |
-          rm -f README.md download_status.txt extracted_links.txt
-          rm -rf downloaded_files
-          echo "🧹 Cleaned up temporary files"
+          rm -f README.md extracted_links.txt
+          rm -rf thumbnails downloaded_files
