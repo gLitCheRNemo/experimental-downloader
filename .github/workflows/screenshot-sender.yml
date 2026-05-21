@@ -33,7 +33,7 @@ on:
         type: string
         default: '45'
       password:
-        description: '🔒 Password for ZIP encryption (optional)'
+        description: '🔒 Password for archive encryption (optional)'
         required: false
         type: string
         default: ''
@@ -78,6 +78,11 @@ jobs:
             git commit --allow-empty -m "[bot] Initialize screenshot branch"
             git push --set-upstream origin screenshot
           fi
+
+      - name: Install 7-Zip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full
 
       - name: Setup Puppeteer
         run: |
@@ -180,7 +185,9 @@ jobs:
           DELAY_SECONDS: ${{ inputs.delay_seconds }}
 
       # ============================================
-      # Split screenshot(s) into zip archive(s) with optional password
+      # Split screenshot(s) into archives
+      # Uses 7-Zip for password-protected (no corruption)
+      # Uses zip for unencrypted (faster)
       # ============================================
       - name: Split screenshot(s) into archives
         id: split
@@ -198,7 +205,7 @@ jobs:
           
           # Show password status
           if [ -n "$ZIP_PASSWORD" ]; then
-            echo "🔒 Password protection: ENABLED (using default compression)"
+            echo "🔒 Password protection: ENABLED (using 7-Zip for compatibility)"
           else
             echo "🔓 Password protection: DISABLED"
           fi
@@ -226,19 +233,34 @@ jobs:
             echo "Split size limit: ${PARTS_SIZE} MB"
             
             if [ $TOTAL_SIZE_MB -le $PARTS_SIZE ]; then
-              echo "Creating single ZIP file (within size limit)"
+              echo "Creating single archive (within size limit)"
               if [ -n "$ZIP_PASSWORD" ]; then
-                zip -r -P "${ZIP_PASSWORD}" "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}_screenshots"
-                echo "✅ Created password-protected: ${OUTPUT_NAME}.zip"
+                # Use 7-Zip for password protection (handles PNGs correctly)
+                7z a -tzip -p"${ZIP_PASSWORD}" -mx0 "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}_screenshots"
+                echo "✅ Created password-protected: ${OUTPUT_NAME}.zip (7-Zip, store mode)"
               else
                 zip -0 -r "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}_screenshots"
                 echo "✅ Created: ${OUTPUT_NAME}.zip"
               fi
               echo "SINGLE_FILE=true" >> $GITHUB_ENV
             else
-              echo "Creating split ZIP archive (exceeds size limit)"
+              echo "Creating split archive (exceeds size limit)"
               if [ -n "$ZIP_PASSWORD" ]; then
-                zip -r -P "${ZIP_PASSWORD}" -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}_screenshots"
+                # For split archives with password, create single 7z then manually split
+                7z a -tzip -p"${ZIP_PASSWORD}" -mx0 "${OUTPUT_NAME}_full.zip" "${OUTPUT_NAME}_screenshots"
+                echo "Split password-protected archive into ${PARTS_SIZE}MB parts..."
+                split -b ${PARTS_SIZE}M "${OUTPUT_NAME}_full.zip" "${OUTPUT_NAME}.z"
+                # Rename split files to match expected pattern
+                COUNTER=1
+                for part in $(ls -1 ${OUTPUT_NAME}.z* | sort); do
+                  if [ $COUNTER -eq 1 ]; then
+                    mv "$part" "${OUTPUT_NAME}.zip"
+                  else
+                    mv "$part" "${OUTPUT_NAME}.z$(printf "%02d" $((COUNTER-1)))"
+                  fi
+                  COUNTER=$((COUNTER + 1))
+                done
+                rm -f "${OUTPUT_NAME}_full.zip"
                 echo "✅ Created password-protected split archive parts"
               else
                 zip -0 -r -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}_screenshots"
@@ -247,7 +269,7 @@ jobs:
               echo "SINGLE_FILE=false" >> $GITHUB_ENV
             fi
             
-            # Remove the folder after zipping
+            # Remove the folder after archiving
             rm -rf "${OUTPUT_NAME}_screenshots"
             echo "Removed temporary folder"
             
@@ -264,10 +286,11 @@ jobs:
               echo "Split size limit: ${PARTS_SIZE} MB"
               
               if [ $FILE_SIZE_MB -le $PARTS_SIZE ]; then
-                echo "Creating single ZIP file"
+                echo "Creating single archive"
                 if [ -n "$ZIP_PASSWORD" ]; then
-                  zip -P "${ZIP_PASSWORD}" "${OUTPUT_NAME}.zip" "${PNG_FILE}"
-                  echo "✅ Created password-protected: ${OUTPUT_NAME}.zip"
+                  # Use 7-Zip for password protection (handles PNGs correctly)
+                  7z a -tzip -p"${ZIP_PASSWORD}" -mx0 "${OUTPUT_NAME}.zip" "${PNG_FILE}"
+                  echo "✅ Created password-protected: ${OUTPUT_NAME}.zip (7-Zip, store mode)"
                 else
                   zip -0 "${OUTPUT_NAME}.zip" "${PNG_FILE}"
                   echo "✅ Created: ${OUTPUT_NAME}.zip"
@@ -275,10 +298,11 @@ jobs:
                 rm -f "${PNG_FILE}"
                 echo "SINGLE_FILE=true" >> $GITHUB_ENV
               else
-                echo "Creating split ZIP archive"
+                echo "Creating split archive"
                 if [ -n "$ZIP_PASSWORD" ]; then
-                  zip -P "${ZIP_PASSWORD}" -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${PNG_FILE}"
-                  echo "✅ Created password-protected split archive parts"
+                  # For single large file with password, use 7-Zip with split
+                  7z a -tzip -p"${ZIP_PASSWORD}" -mx0 -v${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${PNG_FILE}"
+                  echo "✅ Created password-protected split archive parts (7-Zip)"
                 else
                   zip -0 -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${PNG_FILE}"
                   echo "✅ Created split archive parts"
@@ -294,13 +318,13 @@ jobs:
           
           # Show what files were created
           echo ""
-          echo "Files in screenshot folder after zipping:"
+          echo "Files in screenshot folder after archiving:"
           ls -la
           
           cd ..
 
       # ============================================
-      # Generate README (NO details section)
+      # Generate README
       # ============================================
       - name: Generate README with Download Links
         run: |
@@ -493,18 +517,11 @@ jobs:
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
           LINK_COUNT="${{ env.LINK_COUNT }}"
-          ZIP_PASSWORD="${{ inputs.password }}"
           
-          # Build initial message (NO password shown, just indicator)
-          if [ -n "$ZIP_PASSWORD" ]; then
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-              -d "chat_id=${CHAT_ID}" \
-              -d "text=📸 Found ${LINK_COUNT} file part(s) in README.%0A🔒 Archive is password protected.%0A⬇️ Downloading and sending..."
-          else
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-              -d "chat_id=${CHAT_ID}" \
-              -d "text=📸 Found ${LINK_COUNT} file part(s) in README.%0A⬇️ Downloading and sending..."
-          fi
+          # Simple initial message - NO password mention
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=📸 Found ${LINK_COUNT} file part(s) in README.%0A⬇️ Downloading and sending..."
           
           cd downloaded_files
           
@@ -514,8 +531,8 @@ jobs:
               SIZE=$(stat -c%s "$FILE")
               SIZE_MB=$((SIZE / 1024 / 1024))
               
-              # Simple caption with NO password indicator
-              CAPTION="${FILE} | ${SIZE_MB}MB"
+              # Simple caption - filename and size only
+              CAPTION="${FILE} | ${SIZE_MB} MB"
               
               echo "Sending file $FILE_NUM: $FILE (${SIZE_MB} MB)"
               
