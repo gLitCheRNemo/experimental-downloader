@@ -49,105 +49,125 @@ jobs:
             git push --set-upstream origin thumbnails
           fi
 
-      - name: Setup yt-dlp and ffmpeg
+      # ============================================
+      # EXTRACT VIDEO ID FROM YOUTUBE URL
+      # Supports: youtube.com, youtu.be, m.youtube.com, etc.
+      # ============================================
+      - name: Extract video ID and title
+        id: extract
         run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-pip wget ffmpeg
-          pip install yt-dlp --upgrade
+          URL="${{ inputs.youtube_url }}"
+          
+          echo "=========================================="
+          echo "Extracting video ID from: $URL"
+          echo "=========================================="
+          
+          # Extract video ID using regex (supports multiple YouTube URL formats)
+          VIDEO_ID=$(echo "$URL" | grep -oP '(?<=v=)[^&]+|(?<=youtu\.be/)[^?]+|(?<=embed/)[^?]+|(?<=shorts/)[^?]+' | head -1)
+          
+          if [ -z "$VIDEO_ID" ]; then
+            echo "❌ Failed to extract video ID from URL"
+            echo "Supported formats:"
+            echo "  - https://www.youtube.com/watch?v=VIDEO_ID"
+            echo "  - https://youtu.be/VIDEO_ID"
+            echo "  - https://www.youtube.com/embed/VIDEO_ID"
+            echo "  - https://www.youtube.com/shorts/VIDEO_ID"
+            exit 1
+          fi
+          
+          echo "✅ Extracted VIDEO_ID: $VIDEO_ID"
+          echo "VIDEO_ID=$VIDEO_ID" >> $GITHUB_ENV
+          
+          # Get video title using simple oEmbed API (no yt-dlp needed)
+          echo "Fetching video title from oEmbed API..."
+          TITLE=$(curl -s "https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=$VIDEO_ID&format=json" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('title', 'Unknown'))" 2>/dev/null || echo "Unknown")
+          
+          echo "✅ Video title: $TITLE"
+          echo "VIDEO_TITLE=$TITLE" >> $GITHUB_ENV
+          
+          # Create safe filename from video title
+          SAFE_NAME=$(echo "$TITLE" | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_' | sed 's/^_//;s/_$//')
+          echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
 
       # ============================================
-      # FIXED THUMBNAIL DOWNLOAD
-      # Based on yt-dlp issues #6861 and #13570
-      # The key is using --write-thumbnail with --convert-thumbnails
+      # DOWNLOAD THUMBNAIL USING DIRECT URL METHOD
+      # No tools required - just wget
       # ============================================
       - name: Download thumbnail
         id: download
         run: |
-          URL="${{ inputs.youtube_url }}"
+          VIDEO_ID="${{ env.VIDEO_ID }}"
+          SAFE_NAME="${{ env.SAFE_NAME }}"
           
-          # Get video title and ID using yt-dlp
-          VIDEO_TITLE=$(yt-dlp --get-title "$URL")
-          VIDEO_ID=$(yt-dlp --get-id "$URL")
-          echo "VIDEO_TITLE=$VIDEO_TITLE" >> $GITHUB_ENV
-          echo "Video title: $VIDEO_TITLE"
-          echo "Video ID: $VIDEO_ID"
-          
-          # Create safe filename from video title
-          SAFE_NAME=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_' | sed 's/^_//;s/_$//')
-          echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
-          
-          # Create thumbnails directory
           mkdir -p thumbnails
-          
           cd thumbnails
           
-          # ------------------------------------------------------------------
-          # PRIMARY METHOD: yt-dlp with --write-thumbnail and --convert-thumbnails
-          # This is the correct way according to yt-dlp documentation
-          # Issue #6861 confirms --write-thumbnail is the flag to use
-          # Issue #13570 shows that --convert-thumbnails ensures JPG output
-          # ------------------------------------------------------------------
           echo "=========================================="
-          echo "Downloading thumbnail with yt-dlp..."
+          echo "Downloading thumbnail using Direct URL Method"
           echo "=========================================="
           
-          # Use yt-dlp to download and convert thumbnail to JPG
-          yt-dlp --skip-download \
-                 --write-thumbnail \
-                 --convert-thumbnails jpg \
-                 --ppa "ThumbnailsConvertor:-qmin 1 -q:v 1" \
-                 --output "${SAFE_NAME}.%(ext)s" \
-                 "$URL"
+          THUMBNAIL_FILE=""
           
-          # Check if thumbnail was created
-          if [ -f "${SAFE_NAME}.jpg" ]; then
-            THUMBNAIL_FILE="${SAFE_NAME}.jpg"
-            echo "✅ yt-dlp created JPG thumbnail: $THUMBNAIL_FILE"
-          elif [ -f "${SAFE_NAME}.webp" ]; then
-            # Fallback conversion if WebP was created
-            echo "WebP thumbnail detected, converting to JPG..."
-            ffmpeg -i "${SAFE_NAME}.webp" "${SAFE_NAME}.jpg" -y
-            THUMBNAIL_FILE="${SAFE_NAME}.jpg"
-            rm -f "${SAFE_NAME}.webp"
-            echo "✅ Converted WebP to JPG: $THUMBNAIL_FILE"
-          else
-            echo "⚠️ yt-dlp method failed, trying direct URL fallback..."
-            
-            # ------------------------------------------------------------------
-            # FALLBACK METHOD: Direct YouTube CDN URLs
-            # Only used if yt-dlp method fails
-            # ------------------------------------------------------------------
-            # Try maxresdefault.jpg (best quality)
-            if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/maxresdefault.jpg" -O "${SAFE_NAME}.jpg" 2>/dev/null; then
-              if [ -f "${SAFE_NAME}.jpg" ] && [ $(stat -c%s "${SAFE_NAME}.jpg") -gt 10000 ]; then
+          # Try qualities from best to worst
+          # maxresdefault.jpg (1280x720) - Best quality, but not always available
+          echo "Trying maxresdefault.jpg (best quality)..."
+          if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/maxresdefault.jpg" -O "${SAFE_NAME}.jpg" 2>/dev/null; then
+            if [ -f "${SAFE_NAME}.jpg" ] && [ $(stat -c%s "${SAFE_NAME}.jpg") -gt 10000 ]; then
+              THUMBNAIL_FILE="${SAFE_NAME}.jpg"
+              echo "✅ Downloaded maxresdefault.jpg (1280x720)"
+            else
+              rm -f "${SAFE_NAME}.jpg"
+            fi
+          fi
+          
+          # sddefault.jpg (640x480) - Good fallback
+          if [ -z "$THUMBNAIL_FILE" ]; then
+            echo "Trying sddefault.jpg (640x480)..."
+            if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/sddefault.jpg" -O "${SAFE_NAME}.jpg" 2>/dev/null; then
+              if [ -f "${SAFE_NAME}.jpg" ] && [ $(stat -c%s "${SAFE_NAME}.jpg") -gt 5000 ]; then
                 THUMBNAIL_FILE="${SAFE_NAME}.jpg"
-                echo "✅ Downloaded maxresdefault.jpg"
+                echo "✅ Downloaded sddefault.jpg (640x480)"
               else
                 rm -f "${SAFE_NAME}.jpg"
               fi
             fi
-            
-            # Try sddefault.jpg if maxresdefault failed
-            if [ -z "$THUMBNAIL_FILE" ]; then
-              if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/sddefault.jpg" -O "${SAFE_NAME}.jpg" 2>/dev/null; then
-                if [ -f "${SAFE_NAME}.jpg" ] && [ $(stat -c%s "${SAFE_NAME}.jpg") -gt 5000 ]; then
-                  THUMBNAIL_FILE="${SAFE_NAME}.jpg"
-                  echo "✅ Downloaded sddefault.jpg"
-                else
-                  rm -f "${SAFE_NAME}.jpg"
-                fi
+          fi
+          
+          # hqdefault.jpg (480x360) - Standard quality
+          if [ -z "$THUMBNAIL_FILE" ]; then
+            echo "Trying hqdefault.jpg (480x360)..."
+            if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/hqdefault.jpg" -O "${SAFE_NAME}.jpg" 2>/dev/null; then
+              if [ -f "${SAFE_NAME}.jpg" ] && [ $(stat -c%s "${SAFE_NAME}.jpg") -gt 2000 ]; then
+                THUMBNAIL_FILE="${SAFE_NAME}.jpg"
+                echo "✅ Downloaded hqdefault.jpg (480x360)"
+              else
+                rm -f "${SAFE_NAME}.jpg"
               fi
             fi
-            
-            # Try hqdefault.jpg as last resort
-            if [ -z "$THUMBNAIL_FILE" ]; then
-              if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/hqdefault.jpg" -O "${SAFE_NAME}.jpg" 2>/dev/null; then
-                if [ -f "${SAFE_NAME}.jpg" ] && [ $(stat -c%s "${SAFE_NAME}.jpg") -gt 2000 ]; then
-                  THUMBNAIL_FILE="${SAFE_NAME}.jpg"
-                  echo "✅ Downloaded hqdefault.jpg"
-                else
-                  rm -f "${SAFE_NAME}.jpg"
-                fi
+          fi
+          
+          # mqdefault.jpg (320x180) - Medium quality
+          if [ -z "$THUMBNAIL_FILE" ]; then
+            echo "Trying mqdefault.jpg (320x180)..."
+            if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/mqdefault.jpg" -O "${SAFE_NAME}.jpg" 2>/dev/null; then
+              if [ -f "${SAFE_NAME}.jpg" ] && [ $(stat -c%s "${SAFE_NAME}.jpg") -gt 1000 ]; then
+                THUMBNAIL_FILE="${SAFE_NAME}.jpg"
+                echo "✅ Downloaded mqdefault.jpg (320x180)"
+              else
+                rm -f "${SAFE_NAME}.jpg"
+              fi
+            fi
+          fi
+          
+          # default.jpg (120x90) - Lowest quality
+          if [ -z "$THUMBNAIL_FILE" ]; then
+            echo "Trying default.jpg (120x90)..."
+            if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/default.jpg" -O "${SAFE_NAME}.jpg" 2>/dev/null; then
+              if [ -f "${SAFE_NAME}.jpg" ] && [ $(stat -c%s "${SAFE_NAME}.jpg") -gt 500 ]; then
+                THUMBNAIL_FILE="${SAFE_NAME}.jpg"
+                echo "✅ Downloaded default.jpg (120x90)"
+              else
+                rm -f "${SAFE_NAME}.jpg"
               fi
             fi
           fi
@@ -156,9 +176,12 @@ jobs:
           
           # Final verification
           if [ -z "$THUMBNAIL_FILE" ] || [ ! -f "thumbnails/$THUMBNAIL_FILE" ]; then
-            echo "❌ All thumbnail download methods failed!"
-            echo "Video ID: $VIDEO_ID"
-            echo "Video URL: $URL"
+            echo "❌ Failed to download thumbnail for video ID: $VIDEO_ID"
+            echo ""
+            echo "Possible reasons:"
+            echo "  - Video is private or deleted"
+            echo "  - Video ID extraction failed"
+            echo "  - YouTube is blocking the request"
             exit 1
           fi
           
@@ -173,6 +196,7 @@ jobs:
           echo "✅ Thumbnail downloaded successfully!"
           echo "   File: $THUMBNAIL_FILE"
           echo "   Size: ${FILE_SIZE_KB} KB"
+          echo "   Path: thumbnails/$THUMBNAIL_FILE"
           echo "=========================================="
 
       - name: Determine next README filename
