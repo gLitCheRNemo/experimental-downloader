@@ -4,34 +4,34 @@ on:
   workflow_dispatch:
     inputs:
       website_url:
-        description: '🔗 Website URL to screenshot or record'
+        description: '🔗 Website URL to capture'
         required: true
         type: string
       output_name:
         description: '📝 Output file name (without extension)'
         required: true
-        default: 'screenshot'
+        default: 'capture'
         type: string
       full_page:
-        description: '📄 Take full-page screenshot (scrolls entire page) - Only for screenshots'
+        description: '📄 Take full-page screenshot (only for screenshot mode)'
         required: false
         default: true
         type: boolean
       screenshot_count:
-        description: '🔢 Number of screenshots to take (1-20) - Only for screenshots'
+        description: '🔢 Number of screenshots to take (1-20) (only for screenshot mode)'
         required: false
         default: '1'
         type: string
       delay_seconds:
-        description: '⏱️ Delay between screenshots (seconds) - Only for screenshots'
+        description: '⏱️ Delay between screenshots (seconds) (only for screenshot mode)'
         required: false
         default: '0'
         type: string
       record_seconds:
-        description: '🎥 Record video for X seconds (if empty, takes screenshots)'
+        description: '🎥 Record video instead of screenshots (seconds, e.g., 60). Leave empty for screenshots.'
         required: false
-        type: string
         default: ''
+        type: string
       parts_size:
         description: '🫙 Parts size (MB)'
         required: false
@@ -48,13 +48,13 @@ on:
 
 jobs:
   # ============================================
-  # JOB 1: Capture content (screenshots or video) and create README
+  # JOB 1: Take screenshots OR record video, then create README
   # ============================================
-  capture-and-release:
+  screenshot-and-release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -88,203 +88,213 @@ jobs:
           npm init -y
           npm install puppeteer puppeteer-screen-recorder
 
-      - name: Capture (screenshots or video)
-        id: capture
+      # ============================================
+      # MODE 1: Record video (if record_seconds is provided)
+      # ============================================
+      - name: Record video
+        id: record
+        if: inputs.record_seconds != ''
+        run: |
+          OUTPUT_NAME="${{ inputs.output_name }}"
+          WEBSITE_URL="${{ inputs.website_url }}"
+          RECORD_SECONDS="${{ inputs.record_seconds }}"
+          
+          mkdir -p screenshot
+          
+          cd capture_script
+          node << 'EOF'
+          const puppeteer = require('puppeteer');
+          const { PuppeteerScreenRecorder } = require('puppeteer-screen-recorder');
+          const path = require('path');
+          
+          (async () => {
+            const browser = await puppeteer.launch({
+              args: ['--no-sandbox', '--disable-setuid-sandbox'],
+              headless: 'new'
+            });
+            const page = await browser.newPage();
+            
+            await page.setViewport({ width: 1920, height: 1080 });
+            
+            const url = process.env.WEBSITE_URL;
+            const outputName = process.env.OUTPUT_NAME;
+            const recordSeconds = parseInt(process.env.RECORD_SECONDS, 10) || 30;
+            
+            console.log(`Navigating to: ${url}`);
+            console.log(`Recording duration: ${recordSeconds} seconds`);
+            
+            await page.goto(url, { waitUntil: 'networkidle2' });
+            
+            console.log('Waiting 5 seconds for initial page load...');
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            
+            const videoPath = path.join('..', 'screenshot', `${outputName}.mp4`);
+            
+            console.log(`Starting recording: ${videoPath}`);
+            const recorder = new PuppeteerScreenRecorder(page);
+            await recorder.start(videoPath);
+            
+            console.log(`Recording for ${recordSeconds} seconds...`);
+            await new Promise(resolve => setTimeout(resolve, recordSeconds * 1000));
+            
+            await recorder.stop();
+            console.log(`✅ Recording saved: ${outputName}.mp4`);
+            
+            await browser.close();
+          })().catch(err => {
+            console.error('Error:', err);
+            process.exit(1);
+          });
+          EOF
+          
+          cd ..
+          
+          # Count files and save to GITHUB_ENV
+          FILE_COUNT=$(ls -1 screenshot/*.mp4 2>/dev/null | wc -l)
+          echo "FILE_COUNT=$FILE_COUNT" >> $GITHUB_ENV
+          echo "IS_VIDEO=true" >> $GITHUB_ENV
+          echo "✅ Created $FILE_COUNT video(s)"
+        env:
+          WEBSITE_URL: ${{ inputs.website_url }}
+          OUTPUT_NAME: ${{ inputs.output_name }}
+          RECORD_SECONDS: ${{ inputs.record_seconds }}
+
+      # ============================================
+      # MODE 2: Take screenshots (if record_seconds is empty)
+      # ============================================
+      - name: Take screenshot(s)
+        id: screenshot
+        if: inputs.record_seconds == ''
         run: |
           OUTPUT_NAME="${{ inputs.output_name }}"
           WEBSITE_URL="${{ inputs.website_url }}"
           FULL_PAGE="${{ inputs.full_page }}"
           SCREENSHOT_COUNT="${{ inputs.screenshot_count }}"
           DELAY_SECONDS="${{ inputs.delay_seconds }}"
-          RECORD_SECONDS="${{ inputs.record_seconds }}"
           
-          mkdir -p capture_output
+          mkdir -p screenshot
           
           cd capture_script
+          node << 'EOF'
+          const puppeteer = require('puppeteer');
+          const fs = require('fs');
+          const path = require('path');
           
-          if [ -n "$RECORD_SECONDS" ]; then
-            echo "=========================================="
-            echo "🎥 RECORDING MODE: ${RECORD_SECONDS} seconds"
-            echo "=========================================="
-            
-            node << 'EOF'
-            const puppeteer = require('puppeteer');
-            const { PuppeteerScreenRecorder } = require('puppeteer-screen-recorder');
-            const path = require('path');
-            
-            (async () => {
-              const browser = await puppeteer.launch({
-                args: ['--no-sandbox', '--disable-setuid-sandbox', '--autoplay-policy=no-user-gesture-required'],
-                headless: 'new'
-              });
-              const page = await browser.newPage();
-              
-              // Enable audio
-              await page.browserContext().overridePermissions(process.env.WEBSITE_URL, ['microphone']);
-              
-              const url = process.env.WEBSITE_URL;
-              const outputName = process.env.OUTPUT_NAME;
-              const recordSeconds = parseInt(process.env.RECORD_SECONDS, 10);
-              
-              console.log(`Navigating to: ${url}`);
-              await page.goto(url, { waitUntil: 'networkidle2' });
-              
-              console.log('Waiting 5 seconds for page to stabilize...');
-              await new Promise(resolve => setTimeout(resolve, 5000));
-              
-              const outputDir = path.join('..', 'capture_output');
-              const videoPath = path.join(outputDir, `${outputName}.mp4`);
-              
-              console.log(`Starting recording for ${recordSeconds} seconds...`);
-              const recorder = new PuppeteerScreenRecorder(page, {
-                fps: 25,
-                videoBitrate: 2000,
-                recordDurationLimit: recordSeconds
-              });
-              
-              await recorder.start(videoPath);
-              console.log(`Recording in progress...`);
-              
-              // Wait for the specified duration
-              await new Promise(resolve => setTimeout(resolve, recordSeconds * 1000));
-              
-              await recorder.stop();
-              console.log(`✅ Recording saved: ${outputName}.mp4`);
-              
-              await browser.close();
-            })().catch(err => {
-              console.error('Error:', err);
-              process.exit(1);
+          (async () => {
+            const browser = await puppeteer.launch({
+              args: ['--no-sandbox', '--disable-setuid-sandbox'],
+              headless: 'new'
             });
-            EOF
-            echo "CAPTURE_TYPE=video" >> $GITHUB_ENV
-            echo "CAPTURE_COUNT_ACTUAL=1" >> $GITHUB_ENV
+            const page = await browser.newPage();
             
-          else
-            echo "=========================================="
-            echo "📸 SCREENSHOT MODE"
-            echo "=========================================="
+            await page.setViewport({ width: 1920, height: 1080 });
             
-            node << 'EOF'
-            const puppeteer = require('puppeteer');
-            const fs = require('fs');
-            const path = require('path');
+            const url = process.env.WEBSITE_URL;
+            const outputName = process.env.OUTPUT_NAME;
+            const fullPage = process.env.FULL_PAGE === 'true';
+            const screenshotCount = parseInt(process.env.SCREENSHOT_COUNT, 10) || 1;
+            const delaySeconds = parseInt(process.env.DELAY_SECONDS, 10) || 0;
             
-            (async () => {
-              const browser = await puppeteer.launch({
-                args: ['--no-sandbox', '--disable-setuid-sandbox'],
-                headless: 'new'
-              });
-              const page = await browser.newPage();
+            console.log(`Navigating to: ${url}`);
+            console.log(`Full-page mode: ${fullPage}`);
+            console.log(`Screenshots to take: ${screenshotCount}`);
+            console.log(`Delay between screenshots: ${delaySeconds}s`);
+            
+            await page.goto(url, { waitUntil: 'networkidle2' });
+            
+            console.log('Waiting 5 seconds for initial page load...');
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            
+            const screenshotDir = path.join('..', 'screenshot');
+            if (!fs.existsSync(screenshotDir)) {
+              fs.mkdirSync(screenshotDir, { recursive: true });
+            }
+            
+            for (let i = 1; i <= screenshotCount; i++) {
+              let filename;
+              if (screenshotCount === 1) {
+                filename = `${outputName}.png`;
+              } else {
+                filename = `${outputName}_${i}.png`;
+              }
+              const filePath = path.join(screenshotDir, filename);
               
-              await page.setViewport({ width: 1920, height: 1080 });
+              console.log(`Taking screenshot ${i}/${screenshotCount}: ${filename}`);
               
-              const url = process.env.WEBSITE_URL;
-              const outputName = process.env.OUTPUT_NAME;
-              const fullPage = process.env.FULL_PAGE === 'true';
-              const screenshotCount = parseInt(process.env.SCREENSHOT_COUNT, 10) || 1;
-              const delaySeconds = parseInt(process.env.DELAY_SECONDS, 10) || 0;
-              
-              console.log(`Navigating to: ${url}`);
-              console.log(`Full-page mode: ${fullPage}`);
-              console.log(`Screenshots to take: ${screenshotCount}`);
-              console.log(`Delay between screenshots: ${delaySeconds}s`);
-              
-              await page.goto(url, { waitUntil: 'networkidle2' });
-              
-              console.log('Waiting 5 seconds for initial page load...');
-              await new Promise(resolve => setTimeout(resolve, 5000));
-              
-              const captureDir = path.join('..', 'capture_output');
-              if (!fs.existsSync(captureDir)) {
-                fs.mkdirSync(captureDir, { recursive: true });
+              if (fullPage) {
+                await page.screenshot({ path: filePath, fullPage: true });
+              } else {
+                await page.screenshot({ path: filePath, fullPage: false });
               }
               
-              for (let i = 1; i <= screenshotCount; i++) {
-                let filename;
-                if (screenshotCount === 1) {
-                  filename = `${outputName}.png`;
-                } else {
-                  filename = `${outputName}_${i}.png`;
-                }
-                const filePath = path.join(captureDir, filename);
-                
-                console.log(`Taking screenshot ${i}/${screenshotCount}: ${filename}`);
-                
-                if (fullPage) {
-                  await page.screenshot({ path: filePath, fullPage: true });
-                } else {
-                  await page.screenshot({ path: filePath, fullPage: false });
-                }
-                
-                console.log(`  ✅ Saved: ${filename}`);
-                
-                if (i < screenshotCount && delaySeconds > 0) {
-                  console.log(`  ⏱️  Waiting ${delaySeconds} seconds...`);
-                  await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
-                }
-              }
+              console.log(`  ✅ Saved: ${filename}`);
               
-              console.log(`\n✅ All ${screenshotCount} screenshot(s) completed!`);
-              await browser.close();
-            })().catch(err => {
-              console.error('Error:', err);
-              process.exit(1);
-            });
-            EOF
+              if (i < screenshotCount && delaySeconds > 0) {
+                console.log(`  ⏱️  Waiting ${delaySeconds} seconds...`);
+                await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
+              }
+            }
             
-            cd ..
-            CAPTURE_COUNT_ACTUAL=$(ls -1 capture_output/*.png 2>/dev/null | wc -l)
-            echo "CAPTURE_COUNT_ACTUAL=$CAPTURE_COUNT_ACTUAL" >> $GITHUB_ENV
-            echo "CAPTURE_TYPE=screenshot" >> $GITHUB_ENV
-            echo "✅ Created $CAPTURE_COUNT_ACTUAL screenshot(s)"
-          fi
+            console.log(`\n✅ All ${screenshotCount} screenshot(s) completed!`);
+            await browser.close();
+          })().catch(err => {
+            console.error('Error:', err);
+            process.exit(1);
+          });
+          EOF
           
           cd ..
+          
+          # Count screenshots and save to GITHUB_ENV
+          FILE_COUNT=$(ls -1 screenshot/*.png 2>/dev/null | wc -l)
+          echo "FILE_COUNT=$FILE_COUNT" >> $GITHUB_ENV
+          echo "IS_VIDEO=false" >> $GITHUB_ENV
+          echo "✅ Created $FILE_COUNT screenshot(s)"
         env:
           WEBSITE_URL: ${{ inputs.website_url }}
           OUTPUT_NAME: ${{ inputs.output_name }}
           FULL_PAGE: ${{ inputs.full_page }}
           SCREENSHOT_COUNT: ${{ inputs.screenshot_count }}
           DELAY_SECONDS: ${{ inputs.delay_seconds }}
-          RECORD_SECONDS: ${{ inputs.record_seconds }}
 
       # ============================================
-      # Process captured files (zip or video)
+      # Split file(s) into zip archive(s)
       # ============================================
-      - name: Process captured files into archives
-        id: process
+      - name: Split files into archives
+        id: split
         run: |
-          cd capture_output
+          cd screenshot
           
           OUTPUT_NAME="${{ inputs.output_name }}"
           PARTS_SIZE="${{ inputs.parts_size }}"
-          CAPTURE_COUNT="${{ env.CAPTURE_COUNT_ACTUAL }}"
-          CAPTURE_TYPE="${{ env.CAPTURE_TYPE }}"
+          FILE_COUNT="${{ env.FILE_COUNT }}"
+          IS_VIDEO="${{ env.IS_VIDEO }}"
           
-          echo "Capture type: $CAPTURE_TYPE"
-          echo "Found files in capture_output:"
+          echo "FILE_COUNT from env: $FILE_COUNT"
+          echo "IS_VIDEO: $IS_VIDEO"
+          echo "Found file(s) in screenshot folder:"
           ls -la
           
-          if [ "$CAPTURE_TYPE" = "video" ]; then
+          if [ "$IS_VIDEO" = "true" ]; then
+            # Handle video file (single file)
             echo "=========================================="
-            echo "Processing video file"
+            echo "Video mode - processing single video file"
             echo "=========================================="
             
             VIDEO_FILE="${OUTPUT_NAME}.mp4"
             if [ -f "$VIDEO_FILE" ]; then
               FILE_SIZE=$(stat -c%s "$VIDEO_FILE")
               FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
-              echo "Video size: ${FILE_SIZE_MB} MB"
+              echo "File size: ${FILE_SIZE_MB} MB"
               echo "Split size limit: ${PARTS_SIZE} MB"
               
               if [ $FILE_SIZE_MB -le $PARTS_SIZE ]; then
-                echo "Creating single ZIP file (within size limit)"
+                echo "Creating single ZIP file"
                 zip -0 "${OUTPUT_NAME}.zip" "${VIDEO_FILE}"
                 rm -f "${VIDEO_FILE}"
                 echo "SINGLE_FILE=true" >> $GITHUB_ENV
               else
-                echo "Creating split ZIP archive (exceeds size limit)"
+                echo "Creating split ZIP archive"
                 zip -0 -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${VIDEO_FILE}"
                 rm -f "${VIDEO_FILE}"
                 echo "SINGLE_FILE=false" >> $GITHUB_ENV
@@ -293,16 +303,14 @@ jobs:
               echo "ERROR: Video file $VIDEO_FILE not found!"
               exit 1
             fi
-            
           else
-            # Screenshot processing (original logic)
-            echo "SCREENSHOT_COUNT from env: $CAPTURE_COUNT"
-            echo "Found PNG file(s) in capture_output folder:"
+            # Handle screenshot files (multiple PNGs)
+            echo "Found PNG file(s) in screenshot folder:"
             ls -la *.png 2>/dev/null || echo "No PNG files found"
             
-            if [ "$CAPTURE_COUNT" -gt 1 ] 2>/dev/null; then
+            if [ "$FILE_COUNT" -gt 1 ] 2>/dev/null; then
               echo "=========================================="
-              echo "Multiple screenshots detected ($CAPTURE_COUNT files)"
+              echo "Multiple screenshots detected ($FILE_COUNT files)"
               echo "Creating folder: ${OUTPUT_NAME}_screenshots"
               echo "=========================================="
               
@@ -362,35 +370,39 @@ jobs:
             fi
           fi
           
+          # Show what files were created
           echo ""
-          echo "Files in capture_output after processing:"
+          echo "Files in screenshot folder after zipping:"
           ls -la
           
           cd ..
 
+      # ============================================
+      # Generate README
+      # ============================================
       - name: Generate README with Download Links
         run: |
           rm -f README.md
           
-          CAPTURE_TYPE="${{ env.CAPTURE_TYPE }}"
-          RECORD_SECONDS="${{ inputs.record_seconds }}"
+          IS_VIDEO="${{ env.IS_VIDEO }}"
           
-          if [ "$CAPTURE_TYPE" = "video" ]; then
-            echo "# 🎥 Screen Recording - ${RECORD_SECONDS} seconds" > README.md
+          if [ "$IS_VIDEO" = "true" ]; then
+            echo "# 🎥 Video Download Links" > README.md
           else
             echo "# 📸 Screenshot Download Links" > README.md
           fi
+          
           echo "Generated on: $(date)" >> README.md
           echo "" >> README.md
           echo "## 📥 Download Links" >> README.md
           
-          # Check if capture_output folder has any files
-          if [ -d "capture_output" ] && [ "$(ls -A capture_output)" ]; then
-            for file in capture_output/*; do
+          # Check if screenshot folder has any files
+          if [ -d "screenshot" ] && [ "$(ls -A screenshot)" ]; then
+            for file in screenshot/*; do
               if [ -f "$file" ]; then
                 filename=$(basename "$file")
                 encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
-                url="https://github.com/${{ github.repository }}/raw/screenshot/capture_output/$encoded_filename"
+                url="https://github.com/${{ github.repository }}/raw/screenshot/screenshot/$encoded_filename"
                 echo "- [Download $filename]($url)" >> README.md
               fi
             done
@@ -400,15 +412,10 @@ jobs:
 
       - name: Commit and Push in Batches of 5
         run: |
-          # Check if capture_output folder exists and has files
-          if [ ! -d "capture_output" ] || [ -z "$(ls -A capture_output)" ]; then
+          # Check if screenshot folder exists and has files
+          if [ ! -d "screenshot" ] || [ -z "$(ls -A screenshot)" ]; then
             echo "No files to commit"
             exit 0
-          fi
-          
-          # Rename folder from capture_output to screenshot for consistency
-          if [ -d "capture_output" ]; then
-            mv capture_output screenshot
           fi
           
           ls screenshot/* 2>/dev/null > file_list.txt || true
@@ -463,9 +470,9 @@ jobs:
   # ============================================
   send-to-bot:
     runs-on: ubuntu-latest
-    needs: capture-and-release
-    if: always() && needs.capture-and-release.result == 'success'
-    
+    needs: screenshot-and-release
+    if: always() && needs.screenshot-and-release.result == 'success'
+
     steps:
       - name: Mask sensitive inputs
         run: |
@@ -559,12 +566,12 @@ jobs:
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
           LINK_COUNT="${{ env.LINK_COUNT }}"
-          RECORD_SECONDS="${{ inputs.record_seconds }}"
+          IS_VIDEO="${{ needs.screenshot-and-release.outputs.IS_VIDEO }}"
           
-          if [ -n "$RECORD_SECONDS" ]; then
+          if [ "$IS_VIDEO" = "true" ]; then
             curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
               -d "chat_id=${CHAT_ID}" \
-              -d "text=🎥 Found ${LINK_COUNT} file part(s) for video recording.%0A⬇️ Downloading and sending..."
+              -d "text=🎥 Found ${LINK_COUNT} file part(s) in README.%0A⬇️ Downloading and sending video..."
           else
             curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
               -d "chat_id=${CHAT_ID}" \
@@ -607,8 +614,8 @@ jobs:
           echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| URL | ${{ inputs.website_url }} |" >> $GITHUB_STEP_SUMMARY
-          if [ -n "${{ inputs.record_seconds }}" ]; then
-            echo "| Mode | Video Recording (${RECORD_SECONDS}s) |" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ inputs.record_seconds }}" != "" ]; then
+            echo "| Mode | Video (${${{ inputs.record_seconds }}} seconds) |" >> $GITHUB_STEP_SUMMARY
           else
             echo "| Mode | Screenshots |" >> $GITHUB_STEP_SUMMARY
             echo "| Full-page mode | ${{ inputs.full_page }} |" >> $GITHUB_STEP_SUMMARY
