@@ -12,6 +12,21 @@ on:
         required: true
         default: 'screenshot'
         type: string
+      full_page:
+        description: '📄 Take full-page screenshot (scrolls entire page)'
+        required: false
+        default: true
+        type: boolean
+      screenshot_count:
+        description: '🔢 Number of screenshots to take (1-20)'
+        required: false
+        default: '1'
+        type: string
+      delay_seconds:
+        description: '⏱️ Delay between screenshots (seconds)'
+        required: false
+        default: '0'
+        type: string
       parts_size:
         description: '🫙 Parts size (MB)'
         required: false
@@ -28,7 +43,7 @@ on:
 
 jobs:
   # ============================================
-  # JOB 1: Take screenshot and create README
+  # JOB 1: Take screenshots and create README
   # ============================================
   screenshot-and-release:
     runs-on: ubuntu-latest
@@ -66,16 +81,22 @@ jobs:
           npm init -y
           npm install puppeteer
 
-      - name: Take screenshot (full page)
+      - name: Take screenshot(s)
         id: screenshot
         run: |
           OUTPUT_NAME="${{ inputs.output_name }}"
           WEBSITE_URL="${{ inputs.website_url }}"
+          FULL_PAGE="${{ inputs.full_page }}"
+          SCREENSHOT_COUNT="${{ inputs.screenshot_count }}"
+          DELAY_SECONDS="${{ inputs.delay_seconds }}"
+          
           mkdir -p screenshot
           
           cd screenshot_script
           node << 'EOF'
           const puppeteer = require('puppeteer');
+          const fs = require('fs');
+          const path = require('path');
           
           (async () => {
             const browser = await puppeteer.launch({
@@ -88,21 +109,64 @@ jobs:
             await page.setViewport({ width: 1920, height: 1080 });
             
             const url = process.env.WEBSITE_URL;
+            const outputName = process.env.OUTPUT_NAME;
+            const fullPage = process.env.FULL_PAGE === 'true';
+            const screenshotCount = parseInt(process.env.SCREENSHOT_COUNT, 10) || 1;
+            const delaySeconds = parseInt(process.env.DELAY_SECONDS, 10) || 0;
+            
             console.log(`Navigating to: ${url}`);
+            console.log(`Full-page mode: ${fullPage}`);
+            console.log(`Screenshots to take: ${screenshotCount}`);
+            console.log(`Delay between screenshots: ${delaySeconds}s`);
             
             // Wait for page to fully load
             await page.goto(url, { waitUntil: 'networkidle2' });
             
-            console.log('Waiting 20 seconds for full page load and dynamic content...');
-            await new Promise(resolve => setTimeout(resolve, 20000));
+            console.log('Waiting 5 seconds for initial page load and dynamic content...');
+            await new Promise(resolve => setTimeout(resolve, 5000));
             
-            const outputName = process.env.OUTPUT_NAME;
-            // Capture FULL PAGE screenshot (scrolls automatically)
-            await page.screenshot({ 
-              path: `../screenshot/${outputName}.png`, 
-              fullPage: true 
-            });
-            console.log(`Full-page screenshot saved: screenshot/${outputName}.png`);
+            // Create output directory if it doesn't exist
+            const screenshotDir = path.join('..', 'screenshot');
+            if (!fs.existsSync(screenshotDir)) {
+              fs.mkdirSync(screenshotDir, { recursive: true });
+            }
+            
+            for (let i = 1; i <= screenshotCount; i++) {
+              // Generate filename with index
+              let filename;
+              if (screenshotCount === 1) {
+                filename = `${outputName}.png`;
+              } else {
+                filename = `${outputName}_${i}.png`;
+              }
+              const filePath = path.join(screenshotDir, filename);
+              
+              console.log(`Taking screenshot ${i}/${screenshotCount}: ${filename}`);
+              
+              if (fullPage) {
+                // Capture FULL PAGE screenshot (scrolls automatically)
+                await page.screenshot({ 
+                  path: filePath, 
+                  fullPage: true 
+                });
+              } else {
+                // Capture viewport-only screenshot
+                await page.screenshot({ 
+                  path: filePath, 
+                  fullPage: false 
+                });
+              }
+              
+              console.log(`  ✅ Saved: ${filename}`);
+              
+              // Add delay between screenshots (except after the last one)
+              if (i < screenshotCount && delaySeconds > 0) {
+                console.log(`  ⏱️  Waiting ${delaySeconds} seconds before next screenshot...`);
+                await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
+              }
+            }
+            
+            console.log(`\n✅ All ${screenshotCount} screenshot(s) completed!`);
             
             await browser.close();
           })().catch(err => {
@@ -111,39 +175,76 @@ jobs:
           });
           EOF
           
+          # Count how many screenshots were created
+          SCREENSHOT_COUNT_ACTUAL=$(ls -1 screenshot/*.png 2>/dev/null | wc -l)
+          echo "SCREENSHOT_COUNT_ACTUAL=$SCREENSHOT_COUNT_ACTUAL" >> $GITHUB_ENV
           echo "FILE_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
+          
+          echo "✅ Created $SCREENSHOT_COUNT_ACTUAL screenshot(s)"
         env:
           WEBSITE_URL: ${{ inputs.website_url }}
           OUTPUT_NAME: ${{ inputs.output_name }}
+          FULL_PAGE: ${{ inputs.full_page }}
+          SCREENSHOT_COUNT: ${{ inputs.screenshot_count }}
+          DELAY_SECONDS: ${{ inputs.delay_seconds }}
 
-      - name: Split screenshot
+      - name: Split screenshot(s) into archives
         id: split
         run: |
           PARTS_SIZE="${{ inputs.parts_size }}"
           OUTPUT_NAME="${{ inputs.output_name }}"
-          PNG_PATH="screenshot/${OUTPUT_NAME}.png"
-          
-          # Get file size in MB
-          FILE_SIZE=$(stat -c%s "$PNG_PATH")
-          FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
-          
-          echo "File size: ${FILE_SIZE_MB} MB"
-          echo "Split size: ${PARTS_SIZE} MB"
+          SCREENSHOT_COUNT="${{ env.SCREENSHOT_COUNT_ACTUAL }}"
           
           cd screenshot
           
-          if [ $FILE_SIZE_MB -le $PARTS_SIZE ]; then
-            echo "File is smaller than split size. Creating single ZIP file."
-            zip -0 "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}.png"
-            rm -f "${OUTPUT_NAME}.png"
-            echo "SINGLE_FILE=true" >> $GITHUB_ENV
+          # If multiple screenshots, zip them all together
+          if [ "$SCREENSHOT_COUNT" -gt 1 ]; then
+            echo "Multiple screenshots detected. Combining into a single archive."
+            
+            # Get total size of all PNG files
+            TOTAL_SIZE=$(du -sb . | cut -f1)
+            TOTAL_SIZE_MB=$((TOTAL_SIZE / 1024 / 1024))
+            echo "Total combined size: ${TOTAL_SIZE_MB} MB"
+            
+            if [ $TOTAL_SIZE_MB -le $PARTS_SIZE ]; then
+              echo "Combined size is within limit. Creating single ZIP file."
+              zip -0 "${OUTPUT_NAME}.zip" *.png
+              rm -f *.png
+              echo "SINGLE_FILE=true" >> $GITHUB_ENV
+            else
+              echo "Combined size exceeds limit. Creating split ZIP archive."
+              zip -0 -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" *.png
+              rm -f *.png
+              echo "SINGLE_FILE=false" >> $GITHUB_ENV
+              TOTAL_PARTS=$(ls -1 ${OUTPUT_NAME}.z* ${OUTPUT_NAME}.zip 2>/dev/null | wc -l)
+              echo "TOTAL_PARTS=$TOTAL_PARTS" >> $GITHUB_ENV
+            fi
           else
-            echo "File is larger than split size. Creating split ZIP archive."
-            zip -0 -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}.png"
-            rm -f "${OUTPUT_NAME}.png"
-            echo "SINGLE_FILE=false" >> $GITHUB_ENV
-            TOTAL_PARTS=$(ls -1 ${OUTPUT_NAME}.z* ${OUTPUT_NAME}.zip 2>/dev/null | wc -l)
-            echo "TOTAL_PARTS=$TOTAL_PARTS" >> $GITHUB_ENV
+            # Single screenshot - original logic
+            PNG_PATH="${OUTPUT_NAME}.png"
+            FILE_SIZE=$(stat -c%s "$PNG_PATH" 2>/dev/null || echo 0)
+            
+            if [ -f "$PNG_PATH" ]; then
+              FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
+              echo "File size: ${FILE_SIZE_MB} MB"
+              echo "Split size: ${PARTS_SIZE} MB"
+              
+              if [ $FILE_SIZE_MB -le $PARTS_SIZE ]; then
+                echo "File is smaller than split size. Creating single ZIP file."
+                zip -0 "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}.png"
+                rm -f "${OUTPUT_NAME}.png"
+                echo "SINGLE_FILE=true" >> $GITHUB_ENV
+              else
+                echo "File is larger than split size. Creating split ZIP archive."
+                zip -0 -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}.png"
+                rm -f "${OUTPUT_NAME}.png"
+                echo "SINGLE_FILE=false" >> $GITHUB_ENV
+                TOTAL_PARTS=$(ls -1 ${OUTPUT_NAME}.z* ${OUTPUT_NAME}.zip 2>/dev/null | wc -l)
+                echo "TOTAL_PARTS=$TOTAL_PARTS" >> $GITHUB_ENV
+              fi
+            else
+              echo "⚠️ Warning: No PNG file found in screenshot directory"
+            fi
           fi
           
           cd ..
@@ -152,11 +253,19 @@ jobs:
         run: |
           rm -f README.md
           
-          echo "# 📸 Full-Page Screenshot Download Links" > README.md
+          SCREENSHOT_COUNT="${{ env.SCREENSHOT_COUNT_ACTUAL }}"
+          FULL_PAGE_TEXT="${{ inputs.full_page == 'true' && 'Yes (Full Page)' || 'No (Viewport Only)' }}"
+          
+          echo "# 📸 Screenshot Download Links" > README.md
           echo "Generated on: $(date)" >> README.md
           echo "" >> README.md
-          echo "URL: ${{ inputs.website_url }}" >> README.md
+          echo "## 📋 Details" >> README.md
+          echo "- **URL:** ${{ inputs.website_url }}" >> README.md
+          echo "- **Full-page mode:** $FULL_PAGE_TEXT" >> README.md
+          echo "- **Screenshots taken:** $SCREENSHOT_COUNT" >> README.md
+          echo "- **Delay between shots:** ${{ inputs.delay_seconds }} seconds" >> README.md
           echo "" >> README.md
+          echo "## 📥 Download Links" >> README.md
           
           for file in screenshot/*; do
             if [ -f "$file" ]; then
@@ -249,9 +358,8 @@ jobs:
           cat README.md
           echo "=========================================="
           
-          # Extract all download links from README.md
-          grep -oP '\]\(\Khttps://[^)]+' README.md > extracted_links.txt 2>/dev/null || true
-          grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' README.md >> extracted_links.txt 2>/dev/null || true
+          # Extract all download links from README.md (compatible with both grep versions)
+          grep -oE 'https://raw\.githubusercontent\.com/[^ )]+' README.md > extracted_links.txt 2>/dev/null || true
           
           sort -u extracted_links.txt -o extracted_links.txt
           sed -i '/^$/d' extracted_links.txt
@@ -313,10 +421,12 @@ jobs:
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
           LINK_COUNT="${{ env.LINK_COUNT }}"
+          SCREENSHOT_COUNT="${{ needs.screenshot-and-release.outputs.SCREENSHOT_COUNT_ACTUAL }}"
           
+          # Send initial message
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            -d "text=📸 Found ${LINK_COUNT} link(s) in README. Downloading and sending..."
+            -d "text=📸 Found ${LINK_COUNT} file part(s) in README.%0A🖼️ Screenshots taken: ${SCREENSHOT_COUNT:-1}%0A⬇️ Downloading and sending..."
           
           cd downloaded_files
           
@@ -349,10 +459,15 @@ jobs:
 
       - name: Show summary
         run: |
-          echo "## 📊 Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## 📊 Screenshot Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| URL | ${{ inputs.website_url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Full-page mode | ${{ inputs.full_page }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Screenshots requested | ${{ inputs.screenshot_count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Screenshots taken | ${{ env.SCREENSHOT_COUNT_ACTUAL }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Delay between shots | ${{ inputs.delay_seconds }} seconds |" >> $GITHUB_STEP_SUMMARY
           echo "| Links found in README | ${{ env.LINK_COUNT }} |" >> $GITHUB_STEP_SUMMARY
           if [ -f "download_status.txt" ]; then
             SUCCESS_COUNT=$(grep -c ":SUCCESS:" download_status.txt || echo "0")
