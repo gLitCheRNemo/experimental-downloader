@@ -49,18 +49,23 @@ jobs:
             git push --set-upstream origin thumbnails
           fi
 
-      - name: Setup yt-dlp
+      - name: Setup yt-dlp and ffmpeg
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip wget
-          pip install yt-dlp
+          sudo apt-get install -y python3-pip wget ffmpeg
+          pip install yt-dlp --upgrade
 
+      # ============================================
+      # FIXED THUMBNAIL DOWNLOAD
+      # Based on yt-dlp issues #6861 and #13570
+      # The key is using --write-thumbnail with --convert-thumbnails
+      # ============================================
       - name: Download thumbnail
         id: download
         run: |
           URL="${{ inputs.youtube_url }}"
           
-          # Get video title and ID
+          # Get video title and ID using yt-dlp
           VIDEO_TITLE=$(yt-dlp --get-title "$URL")
           VIDEO_ID=$(yt-dlp --get-id "$URL")
           echo "VIDEO_TITLE=$VIDEO_TITLE" >> $GITHUB_ENV
@@ -74,69 +79,101 @@ jobs:
           # Create thumbnails directory
           mkdir -p thumbnails
           
-          THUMBNAIL_FILE=""
+          cd thumbnails
           
-          # Method 1: Try maxresdefault.jpg (best quality, 1280x720)
-          echo "Trying maxresdefault.jpg..."
-          if wget -q "https://img.youtube.com/vi/${VIDEO_ID}/maxresdefault.jpg" -O "thumbnails/${SAFE_NAME}.jpg" 2>/dev/null; then
-            if [ -f "thumbnails/${SAFE_NAME}.jpg" ] && [ $(stat -c%s "thumbnails/${SAFE_NAME}.jpg") -gt 10000 ]; then
-              echo "✅ Downloaded maxresdefault.jpg"
-              THUMBNAIL_FILE="${SAFE_NAME}.jpg"
-            else
-              rm -f "thumbnails/${SAFE_NAME}.jpg"
-            fi
-          fi
+          # ------------------------------------------------------------------
+          # PRIMARY METHOD: yt-dlp with --write-thumbnail and --convert-thumbnails
+          # This is the correct way according to yt-dlp documentation
+          # Issue #6861 confirms --write-thumbnail is the flag to use
+          # Issue #13570 shows that --convert-thumbnails ensures JPG output
+          # ------------------------------------------------------------------
+          echo "=========================================="
+          echo "Downloading thumbnail with yt-dlp..."
+          echo "=========================================="
           
-          # Method 2: Fallback to sddefault.jpg (640x480)
-          if [ -z "$THUMBNAIL_FILE" ]; then
-            echo "Trying sddefault.jpg..."
-            if wget -q "https://img.youtube.com/vi/${VIDEO_ID}/sddefault.jpg" -O "thumbnails/${SAFE_NAME}.jpg" 2>/dev/null; then
-              if [ -f "thumbnails/${SAFE_NAME}.jpg" ] && [ $(stat -c%s "thumbnails/${SAFE_NAME}.jpg") -gt 5000 ]; then
-                echo "✅ Downloaded sddefault.jpg"
+          # Use yt-dlp to download and convert thumbnail to JPG
+          yt-dlp --skip-download \
+                 --write-thumbnail \
+                 --convert-thumbnails jpg \
+                 --ppa "ThumbnailsConvertor:-qmin 1 -q:v 1" \
+                 --output "${SAFE_NAME}.%(ext)s" \
+                 "$URL"
+          
+          # Check if thumbnail was created
+          if [ -f "${SAFE_NAME}.jpg" ]; then
+            THUMBNAIL_FILE="${SAFE_NAME}.jpg"
+            echo "✅ yt-dlp created JPG thumbnail: $THUMBNAIL_FILE"
+          elif [ -f "${SAFE_NAME}.webp" ]; then
+            # Fallback conversion if WebP was created
+            echo "WebP thumbnail detected, converting to JPG..."
+            ffmpeg -i "${SAFE_NAME}.webp" "${SAFE_NAME}.jpg" -y
+            THUMBNAIL_FILE="${SAFE_NAME}.jpg"
+            rm -f "${SAFE_NAME}.webp"
+            echo "✅ Converted WebP to JPG: $THUMBNAIL_FILE"
+          else
+            echo "⚠️ yt-dlp method failed, trying direct URL fallback..."
+            
+            # ------------------------------------------------------------------
+            # FALLBACK METHOD: Direct YouTube CDN URLs
+            # Only used if yt-dlp method fails
+            # ------------------------------------------------------------------
+            # Try maxresdefault.jpg (best quality)
+            if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/maxresdefault.jpg" -O "${SAFE_NAME}.jpg" 2>/dev/null; then
+              if [ -f "${SAFE_NAME}.jpg" ] && [ $(stat -c%s "${SAFE_NAME}.jpg") -gt 10000 ]; then
                 THUMBNAIL_FILE="${SAFE_NAME}.jpg"
+                echo "✅ Downloaded maxresdefault.jpg"
               else
-                rm -f "thumbnails/${SAFE_NAME}.jpg"
+                rm -f "${SAFE_NAME}.jpg"
+              fi
+            fi
+            
+            # Try sddefault.jpg if maxresdefault failed
+            if [ -z "$THUMBNAIL_FILE" ]; then
+              if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/sddefault.jpg" -O "${SAFE_NAME}.jpg" 2>/dev/null; then
+                if [ -f "${SAFE_NAME}.jpg" ] && [ $(stat -c%s "${SAFE_NAME}.jpg") -gt 5000 ]; then
+                  THUMBNAIL_FILE="${SAFE_NAME}.jpg"
+                  echo "✅ Downloaded sddefault.jpg"
+                else
+                  rm -f "${SAFE_NAME}.jpg"
+                fi
+              fi
+            fi
+            
+            # Try hqdefault.jpg as last resort
+            if [ -z "$THUMBNAIL_FILE" ]; then
+              if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/hqdefault.jpg" -O "${SAFE_NAME}.jpg" 2>/dev/null; then
+                if [ -f "${SAFE_NAME}.jpg" ] && [ $(stat -c%s "${SAFE_NAME}.jpg") -gt 2000 ]; then
+                  THUMBNAIL_FILE="${SAFE_NAME}.jpg"
+                  echo "✅ Downloaded hqdefault.jpg"
+                else
+                  rm -f "${SAFE_NAME}.jpg"
+                fi
               fi
             fi
           fi
           
-          # Method 3: Fallback to hqdefault.jpg (480x360)
-          if [ -z "$THUMBNAIL_FILE" ]; then
-            echo "Trying hqdefault.jpg..."
-            if wget -q "https://img.youtube.com/vi/${VIDEO_ID}/hqdefault.jpg" -O "thumbnails/${SAFE_NAME}.jpg" 2>/dev/null; then
-              if [ -f "thumbnails/${SAFE_NAME}.jpg" ] && [ $(stat -c%s "thumbnails/${SAFE_NAME}.jpg") -gt 2000 ]; then
-                echo "✅ Downloaded hqdefault.jpg"
-                THUMBNAIL_FILE="${SAFE_NAME}.jpg"
-              else
-                rm -f "thumbnails/${SAFE_NAME}.jpg"
-              fi
-            fi
-          fi
+          cd ..
           
-          # Method 4: Final fallback to yt-dlp (any format)
-          if [ -z "$THUMBNAIL_FILE" ]; then
-            echo "Falling back to yt-dlp thumbnail download..."
-            cd thumbnails
-            yt-dlp --skip-download --write-thumbnail --output "${SAFE_NAME}.%(ext)s" "$URL"
-            cd ..
-            THUMBNAIL_FILE=$(ls thumbnails/${SAFE_NAME}.* 2>/dev/null | head -1)
-            THUMBNAIL_FILE=$(basename "$THUMBNAIL_FILE")
-          fi
-          
-          # Verify thumbnail exists
+          # Final verification
           if [ -z "$THUMBNAIL_FILE" ] || [ ! -f "thumbnails/$THUMBNAIL_FILE" ]; then
-            echo "❌ Failed to download thumbnail"
+            echo "❌ All thumbnail download methods failed!"
+            echo "Video ID: $VIDEO_ID"
+            echo "Video URL: $URL"
             exit 1
           fi
           
-          # Get extension
-          THUMBNAIL_EXT="${THUMBNAIL_FILE##*.}"
-          echo "THUMBNAIL_FILE=$THUMBNAIL_FILE" >> $GITHUB_ENV
-          echo "THUMBNAIL_EXT=$THUMBNAIL_EXT" >> $GITHUB_ENV
+          # Get file size
+          FILE_SIZE=$(stat -c%s "thumbnails/$THUMBNAIL_FILE")
+          FILE_SIZE_KB=$((FILE_SIZE / 1024))
           
-          # Show file info
-          ls -la "thumbnails/$THUMBNAIL_FILE"
-          echo "✅ Downloaded: $THUMBNAIL_FILE ($THUMBNAIL_EXT, $(stat -c%s "thumbnails/$THUMBNAIL_FILE") bytes)"
+          echo "THUMBNAIL_FILE=$THUMBNAIL_FILE" >> $GITHUB_ENV
+          
+          echo ""
+          echo "=========================================="
+          echo "✅ Thumbnail downloaded successfully!"
+          echo "   File: $THUMBNAIL_FILE"
+          echo "   Size: ${FILE_SIZE_KB} KB"
+          echo "=========================================="
 
       - name: Determine next README filename
         id: readme_name
@@ -186,7 +223,6 @@ jobs:
           echo "- [Download $THUMBNAIL_FILE]($url)" >> "$README_NAME"
           
           echo "✅ Generated README: $README_NAME"
-          echo "Link: $url"
 
       - name: Save video title to file
         run: |
@@ -290,10 +326,8 @@ jobs:
           # Clear previous file
           > extracted_link.txt
           
-          # Extract download link from README (looking for raw.githubusercontent.com URLs)
+          # Extract download link from README (using both patterns for reliability)
           grep -oE 'https://raw\.githubusercontent\.com/[^ )]+' "$README_FILE" >> extracted_link.txt 2>/dev/null || true
-          
-          # Also try markdown link pattern
           grep -oP '\]\(\Khttps://[^)]+' "$README_FILE" >> extracted_link.txt 2>/dev/null || true
           
           sort -u extracted_link.txt -o extracted_link.txt
