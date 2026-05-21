@@ -25,6 +25,10 @@ on:
         required: false
         type: string
         default: '45'
+      output_name:
+        description: '📝 Output file name (optional, without extension)'
+        required: false
+        type: string
       bale_token:
         description: '🤖 Bale Bot Token (for sending files)'
         required: true
@@ -123,7 +127,7 @@ jobs:
           echo "$DENO_INSTALL/bin" >> $GITHUB_PATH
           deno --version
           
-      - name: Download video
+      - name: Download videos
         id: download
         run: |
           QUALITY="${{ inputs.quality }}"
@@ -135,12 +139,18 @@ jobs:
           else
             FORMAT_OPTS="-f bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}] --merge-output-format mp4"
           fi
+
+          OUTPUT_NAME="${{ inputs.output_name }}"
+          if [ -n "$OUTPUT_NAME" ]; then
+            OUTPUT_OPTS="-o ${OUTPUT_NAME}.%(ext)s"
+          else
+            OUTPUT_OPTS=""
+          fi
           
           mkdir -p tmpvideos
           cd tmpvideos
-          yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" $FORMAT_OPTS "${{ inputs.youtube_url }}"
+          yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" $FORMAT_OPTS $OUTPUT_OPTS "${{ inputs.youtube_url }}"
 
-          # Find the downloaded file
           FILE=$(ls -1 | head -n 1)
           FILE_NO_EXTENSION="${FILE%.*}"
           echo "FILE=$FILE" >> $GITHUB_ENV
@@ -153,75 +163,8 @@ jobs:
           # Create a safe folder name (replace problematic characters with underscores)
           SAFE_NAME=$(echo "$FILE" | sed 's/\.[^.]*$//' | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_')
           echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
-          
-          # Extract video ID for thumbnail
-          VIDEO_URL="${{ inputs.youtube_url }}"
-          VIDEO_ID=$(echo "$VIDEO_URL" | grep -oP '(?<=v=)[^&]+|(?<=youtu\.be/)[^?]+|(?<=embed/)[^?]+|(?<=shorts/)[^?]+' | head -1)
-          echo "VIDEO_ID=$VIDEO_ID" >> $GITHUB_ENV
 
-      # ============================================
-      # Download thumbnail using direct URL method
-      # ============================================
-      - name: Download thumbnail
-        id: thumbnail
-        run: |
-          VIDEO_ID="${{ env.VIDEO_ID }}"
-          SAFE_NAME="${{ env.SAFE_NAME }}"
-          VIDEO_FOLDER="${{ env.SAFE_NAME }}"
-          
-          mkdir -p "$VIDEO_FOLDER"
-          
-          echo "=========================================="
-          echo "Downloading thumbnail for video ID: $VIDEO_ID"
-          echo "=========================================="
-          
-          THUMBNAIL_DOWNLOADED=false
-          
-          # Try maxresdefault.jpg (best quality)
-          echo "Trying maxresdefault.jpg..."
-          if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/maxresdefault.jpg" -O "${VIDEO_FOLDER}/thumbnail.jpg" 2>/dev/null; then
-            if [ -f "${VIDEO_FOLDER}/thumbnail.jpg" ] && [ $(stat -c%s "${VIDEO_FOLDER}/thumbnail.jpg") -gt 10000 ]; then
-              THUMBNAIL_DOWNLOADED=true
-              echo "✅ Downloaded maxresdefault.jpg"
-            else
-              rm -f "${VIDEO_FOLDER}/thumbnail.jpg"
-            fi
-          fi
-          
-          # Try sddefault.jpg
-          if [ "$THUMBNAIL_DOWNLOADED" = false ]; then
-            echo "Trying sddefault.jpg..."
-            if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/sddefault.jpg" -O "${VIDEO_FOLDER}/thumbnail.jpg" 2>/dev/null; then
-              if [ -f "${VIDEO_FOLDER}/thumbnail.jpg" ] && [ $(stat -c%s "${VIDEO_FOLDER}/thumbnail.jpg") -gt 5000 ]; then
-                THUMBNAIL_DOWNLOADED=true
-                echo "✅ Downloaded sddefault.jpg"
-              else
-                rm -f "${VIDEO_FOLDER}/thumbnail.jpg"
-              fi
-            fi
-          fi
-          
-          # Try hqdefault.jpg
-          if [ "$THUMBNAIL_DOWNLOADED" = false ]; then
-            echo "Trying hqdefault.jpg..."
-            if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/hqdefault.jpg" -O "${VIDEO_FOLDER}/thumbnail.jpg" 2>/dev/null; then
-              if [ -f "${VIDEO_FOLDER}/thumbnail.jpg" ] && [ $(stat -c%s "${VIDEO_FOLDER}/thumbnail.jpg") -gt 2000 ]; then
-                THUMBNAIL_DOWNLOADED=true
-                echo "✅ Downloaded hqdefault.jpg"
-              else
-                rm -f "${VIDEO_FOLDER}/thumbnail.jpg"
-              fi
-            fi
-          fi
-          
-          # Set flag for later steps
-          if [ "$THUMBNAIL_DOWNLOADED" = true ]; then
-            echo "THUMBNAIL_EXISTS=true" >> $GITHUB_ENV
-            echo "✅ Thumbnail saved to: ${VIDEO_FOLDER}/thumbnail.jpg"
-          else
-            echo "THUMBNAIL_EXISTS=false" >> $GITHUB_ENV
-            echo "⚠️ Could not download thumbnail, continuing without it"
-          fi
+          docker stop warp || true
 
       - name: Create video folder and split files
         id: split
@@ -231,8 +174,6 @@ jobs:
           cd tmpvideos
           zip -0 -s "${{ inputs.parts_size }}m" "../${VIDEO_FOLDER}/${SAFE_NAME}.zip" "$FILE"
           cd ..
-          
-          docker stop warp || true
 
       - name: Determine next README filename
         id: readme_name
@@ -276,7 +217,7 @@ jobs:
           echo "Generated on: $(date)" >> "$README_NAME"
           echo "" >> "$README_NAME"
           
-          # Use the safe folder name
+          # Use the safe folder name (no auto-detection needed since we created it)
           VIDEO_FOLDER="$SAFE_NAME"
           
           echo "Video folder: $VIDEO_FOLDER"
@@ -311,14 +252,6 @@ jobs:
         with:
           name: readme-name
           path: readme_name.txt
-          retention-days: 1
-
-      - name: Upload thumbnail as artifact
-        if: env.THUMBNAIL_EXISTS == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: video-thumbnail
-          path: ${{ env.SAFE_NAME }}/thumbnail.jpg
           retention-days: 1
 
       - name: Commit and Push
@@ -370,14 +303,6 @@ jobs:
           name: video-title
           path: .
 
-      - name: Download thumbnail artifact
-        if: always()
-        uses: actions/download-artifact@v4
-        with:
-          name: video-thumbnail
-          path: .
-          continue-on-error: true
-
       - name: Get README name
         id: get_readme_name
         run: |
@@ -411,7 +336,7 @@ jobs:
           cat "$README_FILE"
           echo "=========================================="
           
-          # Extract all download links from README
+          # Extract all download links from README (using grep -oE for compatibility)
           grep -oE 'https://[^ )]+\.(z[0-9]+|zip)' "$README_FILE" > extracted_links.txt 2>/dev/null || true
           
           sort -u extracted_links.txt -o extracted_links.txt
@@ -469,39 +394,18 @@ jobs:
           echo "Files in downloaded_files directory:"
           ls -lh downloaded_files/
 
-      # ============================================
-      # Send thumbnail with caption (proper newlines) then files
-      # ============================================
-      - name: Send thumbnail with caption and send files to Bale
+      - name: Send files to Bale bot
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
           LINK_COUNT="${{ env.LINK_COUNT }}"
+          
           VIDEO_TITLE=$(cat video_title.txt 2>/dev/null || echo "Unknown")
           
-          # Build caption with actual newlines (not %0A)
-          CAPTION="🎬 *${VIDEO_TITLE}*
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=📦 Found ${LINK_COUNT} link(s) in README.%0A🎬 Video title: ${VIDEO_TITLE}%0A⬇️ Downloading and sending..."
           
-📦 Found ${LINK_COUNT} link(s)
-⬇️ Downloading and sending..."
-          
-          # Send thumbnail with caption (ONE message with image + text)
-          if [ -f "thumbnail.jpg" ]; then
-            echo "Sending thumbnail with caption..."
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendPhoto" \
-              -F "chat_id=${CHAT_ID}" \
-              -F "photo=@thumbnail.jpg" \
-              -F "caption=${CAPTION}" \
-              -F "parse_mode=Markdown"
-          else
-            # Fallback if no thumbnail
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-              -d "chat_id=${CHAT_ID}" \
-              -d "text=🎬 *${VIDEO_TITLE}%0A%0A📦 Found ${LINK_COUNT} link(s)%0A⬇️ Downloading and sending..." \
-              -d "parse_mode=Markdown"
-          fi
-          
-          # Send all downloaded files
           cd downloaded_files
           
           FILE_NUM=1
@@ -553,6 +457,6 @@ jobs:
 
       - name: Cleanup
         run: |
-          rm -f README*.md video_title.txt download_status.txt extracted_links.txt readme_name.txt thumbnail.jpg
+          rm -f README*.md video_title.txt download_status.txt extracted_links.txt readme_name.txt
           rm -rf downloaded_files tmpvideos
           echo "🧹 Cleaned up temporary files"
