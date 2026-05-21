@@ -175,7 +175,7 @@ jobs:
           DELAY_SECONDS: ${{ inputs.delay_seconds }}
 
       # ============================================
-      # FIXED: Split screenshot(s) into zip archive(s)
+      # Split screenshot(s) into zip archive(s)
       # ============================================
       - name: Split screenshot(s) into archives
         id: split
@@ -264,25 +264,15 @@ jobs:
           
           cd ..
 
+      # ============================================
+      # Generate README (NO details section)
+      # ============================================
       - name: Generate README with Download Links
         run: |
           rm -f README.md
           
-          SCREENSHOT_COUNT="${{ env.SCREENSHOT_COUNT_ACTUAL }}"
-          if [ -z "$SCREENSHOT_COUNT" ]; then
-            SCREENSHOT_COUNT="1"
-          fi
-          
-          FULL_PAGE_TEXT="${{ inputs.full_page == 'true' && 'Yes (Full Page)' || 'No (Viewport Only)' }}"
-          
           echo "# 📸 Screenshot Download Links" > README.md
           echo "Generated on: $(date)" >> README.md
-          echo "" >> README.md
-          echo "## 📋 Details" >> README.md
-          echo "- **URL:** ${{ inputs.website_url }}" >> README.md
-          echo "- **Full-page mode:** $FULL_PAGE_TEXT" >> README.md
-          echo "- **Screenshots taken:** $SCREENSHOT_COUNT" >> README.md
-          echo "- **Delay between shots:** ${{ inputs.delay_seconds }} seconds" >> README.md
           echo "" >> README.md
           echo "## 📥 Download Links" >> README.md
           
@@ -357,6 +347,7 @@ jobs:
 
   # ============================================
   # JOB 2: Send files to Bale bot using README links
+  # FIXED: Using the proven extractor from send-to-bot.yml
   # ============================================
   send-to-bot:
     runs-on: ubuntu-latest
@@ -375,7 +366,7 @@ jobs:
           name: readme-file
           path: .
 
-      - name: Extract links from README.md
+      - name: Extract links from README.md (fixed method)
         id: extract
         run: |
           if [ ! -f "README.md" ]; then
@@ -388,9 +379,14 @@ jobs:
           cat README.md
           echo "=========================================="
           
-          # Extract all download links from README.md
-          grep -oE 'https://raw\.githubusercontent\.com/[^ )]+' README.md > extracted_links.txt 2>/dev/null || true
+          # Clear previous file
+          > extracted_links.txt
           
+          # Extract links using both patterns (from send-to-bot.yml)
+          grep -oP '\]\(\Khttps://[^)]+' README.md >> extracted_links.txt 2>/dev/null || true
+          grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' README.md >> extracted_links.txt 2>/dev/null || true
+          
+          # Clean up and sort
           sort -u extracted_links.txt -o extracted_links.txt
           sed -i '/^$/d' extracted_links.txt
           
