@@ -1,4 +1,4 @@
-name: 1- Thumbnail Downloader & Sender
+name: Thumbnail Sender
 
 on:
   workflow_dispatch:
@@ -7,74 +7,51 @@ on:
         description: '🔗 YouTube video URL'
         required: true
         type: string
-      output_name:
-        description: '📝 Output file name (without extension)'
-        required: true
-        default: 'thumbnail'
-        type: string
       bale_token:
-        description: '🤖 Bale Bot Token (for sending files)'
+        description: '🤖 Bale Bot Token'
         required: true
         type: string
       bale_chat_id:
-        description: '💬 Bale Chat ID (for sending files)'
+        description: '💬 Bale Chat ID'
         required: true
         type: string
 
 jobs:
-  # ============================================
-  # JOB 1: Download thumbnail and create README
-  # ============================================
-  download-and-release:
+  thumbnail-sender:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: true
-          fetch-depth: 0
-
-      - name: Prepare thumbnails branch
+      - name: Mask sensitive inputs
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git fetch origin
-
-          if git ls-remote --exit-code --heads origin thumbnails; then
-            git checkout thumbnails
-            git pull origin thumbnails
-          else
-            git checkout --orphan thumbnails
-            git rm -rf . || true
-            git commit --allow-empty -m "[bot] Initialize thumbnails branch"
-            git push --set-upstream origin thumbnails
-          fi
+          echo "::add-mask::${{ inputs.bale_token }}"
+          echo "::add-mask::${{ inputs.bale_chat_id }}"
 
       - name: Setup yt-dlp
         run: |
-          sudo apt-get install -y python3-pip curl
-          pip install yt-dlp --upgrade
+          sudo apt-get update
+          sudo apt-get install -y python3-pip
+          pip install yt-dlp
 
-      - name: Download thumbnail only
-        id: download_thumbnail
+      - name: Get video info and download thumbnail
+        id: download
         run: |
-          OUTPUT_NAME="${{ inputs.output_name }}"
-          YOUTUBE_URL="${{ inputs.youtube_url }}"
+          URL="${{ inputs.youtube_url }}"
           
-          # Create a temporary directory for the thumbnail
-          mkdir -p tmp_thumbnails
-          cd tmp_thumbnails
+          # First, get the video title using yt-dlp
+          VIDEO_TITLE=$(yt-dlp --get-title "$URL")
+          echo "VIDEO_TITLE=$VIDEO_TITLE" >> $GITHUB_ENV
+          echo "Video title: $VIDEO_TITLE"
           
-          # Download the best quality thumbnail (yt-dlp automatically gets the best format)
-          # --write-thumbnail: writes thumbnail to disk
-          # --convert-thumbnails jpg: converts to JPG format (optional but ensures .jpg)
-          yt-dlp --write-thumbnail --convert-thumbnails jpg --output "${OUTPUT_NAME}.%(ext)s" "$YOUTUBE_URL"
+          # Download all available thumbnail formats to see what's available
+          echo "Listing available thumbnails:"
+          yt-dlp --list-thumbnails "$URL"
           
-          # Find the downloaded thumbnail file (could be .jpg, .png, .webp etc.)
-          THUMBNAIL_FILE=$(ls -1 2>/dev/null | head -n 1)
+          # Download the best quality thumbnail (yt-dlp will save it in its original format)
+          # Using --write-thumbnail without --convert-thumbnails keeps original format
+          yt-dlp --skip-download --write-thumbnail --output "thumbnail.%(ext)s" "$URL"
+          
+          # Find the downloaded thumbnail file (whatever extension it has)
+          THUMBNAIL_FILE=$(ls thumbnail.* 2>/dev/null | head -1)
           
           if [ -z "$THUMBNAIL_FILE" ]; then
             echo "❌ Failed to download thumbnail"
@@ -83,188 +60,80 @@ jobs:
           
           # Get the file extension
           THUMBNAIL_EXT="${THUMBNAIL_FILE##*.}"
-          
-          # Move the thumbnail to the root directory for later use
-          cp "$THUMBNAIL_FILE" "../${OUTPUT_NAME}.${THUMBNAIL_EXT}"
-          
+          echo "THUMBNAIL_FILE=$THUMBNAIL_FILE" >> $GITHUB_ENV
           echo "THUMBNAIL_EXT=$THUMBNAIL_EXT" >> $GITHUB_ENV
-          echo "THUMBNAIL_FILE=${OUTPUT_NAME}.${THUMBNAIL_EXT}" >> $GITHUB_ENV
-          
-          # Get video title using yt-dlp
-          VIDEO_TITLE=$(yt-dlp --get-title "$YOUTUBE_URL")
-          echo "VIDEO_TITLE=$VIDEO_TITLE" >> $GITHUB_ENV
-          
-          echo "✅ Downloaded thumbnail: ${OUTPUT_NAME}.${THUMBNAIL_EXT}"
-          echo "📹 Video title: $VIDEO_TITLE"
-          
-          cd ..
+          echo "✅ Downloaded thumbnail: $THUMBNAIL_FILE (format: $THUMBNAIL_EXT)"
 
-      - name: Determine next README filename
-        id: readme_name
-        run: |
-          # Find the highest existing README number at the BRANCH ROOT
-          HIGHEST=0
-          for file in README*.md; do
-            if [ -f "$file" ]; then
-              if [ "$file" = "README.md" ]; then
-                NUM=1
-              else
-                NUM=$(echo "$file" | grep -o '[0-9]\+' | head -1)
-                if [ -z "$NUM" ]; then
-                  NUM=1
-                fi
-              fi
-              if [ $NUM -gt $HIGHEST ]; then
-                HIGHEST=$NUM
-              fi
-            fi
-          done
-          
-          NEXT_NUM=$((HIGHEST + 1))
-          
-          if [ $NEXT_NUM -eq 1 ]; then
-            README_NAME="README.md"
-          else
-            README_NAME="README${NEXT_NUM}.md"
-          fi
-          
-          echo "README_NAME=$README_NAME" >> $GITHUB_ENV
-          echo "Using README file at branch root: $README_NAME"
-
-      - name: Generate README with Thumbnail Link
-        run: |
-          README_NAME="${{ env.README_NAME }}"
-          VIDEO_TITLE="${{ env.VIDEO_TITLE }}"
-          THUMBNAIL_FILE="${{ env.THUMBNAIL_FILE }}"
-          YOUTUBE_URL="${{ inputs.youtube_url }}"
-          
-          echo "# 🖼️ Thumbnail Download - ${VIDEO_TITLE}" > "$README_NAME"
-          echo "Generated on: $(date)" >> "$README_NAME"
-          echo "" >> "$README_NAME"
-          echo "**YouTube URL:** [$YOUTUBE_URL]($YOUTUBE_URL)" >> "$README_NAME"
-          echo "" >> "$README_NAME"
-          echo "## 📥 Thumbnail File" >> "$README_NAME"
-          
-          # URL encode the filename for the raw link
-          encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$THUMBNAIL_FILE")
-          url="https://github.com/${{ github.repository }}/raw/thumbnails/$encoded_filename"
-          echo "- [Download $THUMBNAIL_FILE]($url)" >> "$README_NAME"
-
-      - name: Commit and Push Thumbnail and README
-        run: |
-          README_FILE="${{ env.README_NAME }}"
-          THUMBNAIL_FILE="${{ env.THUMBNAIL_FILE }}"
-          
-          # Add the thumbnail file
-          if [ -f "$THUMBNAIL_FILE" ]; then
-            git add "$THUMBNAIL_FILE"
-            echo "Added thumbnail: $THUMBNAIL_FILE"
-          fi
-          
-          # Add the README file
-          if [ -f "$README_FILE" ]; then
-            git add "$README_FILE"
-            echo "Added README: $README_FILE"
-          fi
-          
-          if ! git diff --cached --quiet; then
-            git commit -m "[bot] Add thumbnail: ${{ env.VIDEO_TITLE }}"
-            git push
-            echo "✅ Committed and pushed successfully"
-          else
-            echo "No changes to commit"
-          fi
-
-      - name: Upload thumbnail as artifact for next job
-        uses: actions/upload-artifact@v4
-        with:
-          name: thumbnail-image
-          path: ${{ env.THUMBNAIL_FILE }}
-          retention-days: 1
-
-      - name: Upload video title as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: video-title
-          path: video_title.txt
-          retention-days: 1
-        run: |
-          echo "${{ env.VIDEO_TITLE }}" > video_title.txt
-
-  # ============================================
-  # JOB 2: Extract thumbnail and send to Bale bot
-  # ============================================
-  send-to-bot:
-    runs-on: ubuntu-latest
-    needs: download-and-release
-    if: always() && needs.download-and-release.result == 'success'
-    
-    steps:
-      - name: Mask sensitive inputs
-        run: |
-          echo "::add-mask::${{ inputs.bale_token }}"
-          echo "::add-mask::${{ inputs.bale_chat_id }}"
-
-      - name: Download thumbnail artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: thumbnail-image
-          path: .
-
-      - name: Download video title artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: video-title
-          path: .
-
-      - name: Detect thumbnail file extension
+      - name: Detect thumbnail extension and prepare for sending
         id: detect
         run: |
-          # Find the thumbnail file (regardless of extension)
-          THUMBNAIL_FILE=$(ls -1 *.jpg *.jpeg *.png *.webp 2>/dev/null | head -n 1)
+          THUMBNAIL_FILE="${{ env.THUMBNAIL_FILE }}"
+          THUMBNAIL_EXT="${{ env.THUMBNAIL_EXT }}"
           
-          if [ -z "$THUMBNAIL_FILE" ]; then
-            echo "❌ No thumbnail file found!"
+          # Verify the file exists and has content
+          if [ ! -f "$THUMBNAIL_FILE" ]; then
+            echo "❌ Thumbnail file not found!"
             exit 1
           fi
           
-          echo "THUMBNAIL_FILE=$THUMBNAIL_FILE" >> $GITHUB_ENV
-          echo "✅ Found thumbnail: $THUMBNAIL_FILE"
+          FILE_SIZE=$(stat -c%s "$THUMBNAIL_FILE")
+          echo "File size: $FILE_SIZE bytes"
+          
+          # Bale Bot accepts: jpg, jpeg, png, gif, webp (and more)
+          case "$THUMBNAIL_EXT" in
+            jpg|jpeg|png|gif|webp)
+              echo "✅ Supported format: $THUMBNAIL_EXT"
+              ;;
+            *)
+              echo "⚠️ Warning: Unusual format '$THUMBNAIL_EXT', but will attempt to send anyway"
+              ;;
+          esac
 
-      - name: Send thumbnail to Bale bot with video title
+      - name: Send thumbnail to Bale Bot with video title as caption
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
+          VIDEO_TITLE="${{ env.VIDEO_TITLE }}"
           THUMBNAIL_FILE="${{ env.THUMBNAIL_FILE }}"
-          VIDEO_TITLE=$(cat video_title.txt 2>/dev/null || echo "YouTube Video")
           
-          echo "Sending thumbnail to Bale bot..."
-          echo "Video title: $VIDEO_TITLE"
-          echo "Thumbnail file: $THUMBNAIL_FILE"
+          # Send the photo using Bale Bot API
+          # The 'photo' parameter accepts file upload via @filename
+          echo "Sending thumbnail to Bale Bot..."
           
-          # Send the photo with caption using Bale Bot API
-          # The 'photo' field accepts a file upload with @ syntax
-          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendPhoto" \
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://tapi.bale.ai/bot${TOKEN}/sendPhoto" \
             -F "chat_id=${CHAT_ID}" \
             -F "photo=@${THUMBNAIL_FILE}" \
-            -F "caption=🎬 *${VIDEO_TITLE}*%0A%0A🖼️ Thumbnail downloaded successfully!" \
-            -F "parse_mode=Markdown"
+            -F "caption=🎬 *${VIDEO_TITLE}*" \
+            -F "parse_mode=Markdown")
           
-          echo ""
-          echo "✅ Thumbnail sent to Bale bot!"
+          # Get HTTP status code (last line)
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          # Get response body (everything except last line)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          if [ "$HTTP_CODE" -eq 200 ]; then
+            echo "✅ Thumbnail sent successfully!"
+            echo "Response: $BODY"
+          else
+            echo "❌ Failed to send thumbnail. HTTP code: $HTTP_CODE"
+            echo "Response: $BODY"
+            exit 1
+          fi
 
       - name: Show summary
         run: |
-          echo "## 📊 Thumbnail Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## 📸 Thumbnail Sender Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| YouTube URL | ${{ inputs.youtube_url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Video URL | ${{ inputs.youtube_url }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Video Title | ${{ env.VIDEO_TITLE }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Thumbnail File | ${{ env.THUMBNAIL_FILE }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Sent to Bale | ✅ Yes |" >> $GITHUB_STEP_SUMMARY
+          echo "| Thumbnail Format | ${{ env.THUMBNAIL_EXT }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Thumbnail sent to Bale Bot successfully!"
 
       - name: Cleanup
         run: |
-          rm -f *.jpg *.jpeg *.png *.webp video_title.txt
+          rm -f thumbnail.*
           echo "🧹 Cleaned up temporary files"
