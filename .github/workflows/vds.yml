@@ -321,28 +321,66 @@ jobs:
           path: ${{ env.SAFE_NAME }}/thumbnail.jpg
           retention-days: 1
 
-      - name: Commit and Push
+      # ============================================
+      # MODIFIED: Commit and Push in Batches of 5
+      # ============================================
+      - name: Commit and Push in Batches of 5
         run: |
           VIDEO_FOLDER="${{ env.SAFE_NAME }}"
           README_FILE="${{ env.README_NAME }}"
           
-          if [ -d "$VIDEO_FOLDER" ]; then
-            git add "$VIDEO_FOLDER"
-            echo "Added video folder: $VIDEO_FOLDER"
+          # Store list of files in a temporary file
+          ls "${VIDEO_FOLDER}"/* 2>/dev/null > file_list.txt || true
+          
+          # Count total files
+          TOTAL_FILES=$(cat file_list.txt | wc -l)
+          echo "Total files to commit: $TOTAL_FILES"
+          
+          if [ "$TOTAL_FILES" -eq 0 ]; then
+            echo "No files to commit"
+            exit 0
           fi
           
-          if [ -f "$README_FILE" ]; then
-            git add "$README_FILE"
-            echo "Added README: $README_FILE"
-          fi
+          # Set batch size (5 files per commit)
+          BATCH_SIZE=5
+          BATCH_NUM=1
           
-          if ! git diff --cached --quiet; then
-            git commit -m "[bot] Add video: ${{ env.VIDEO_TITLE }}"
+          # Process files in batches
+          while [ $(cat file_list.txt | wc -l) -gt 0 ]; do
+            # Take first BATCH_SIZE files
+            BATCH_FILES=$(head -n $BATCH_SIZE file_list.txt)
+            
+            # Remove these files from the list for next iteration
+            tail -n +$((BATCH_SIZE + 1)) file_list.txt > temp_list.txt 2>/dev/null || touch temp_list.txt
+            mv temp_list.txt file_list.txt
+            
+            # Add this batch of files
+            for file in $BATCH_FILES; do
+              if [ -f "$file" ]; then
+                git add "$file"
+              fi
+            done
+            
+            # Also add README.md only on first batch
+            if [ $BATCH_NUM -eq 1 ] && [ -f "$README_FILE" ]; then
+              git add "$README_FILE"
+            fi
+            
+            # Commit this batch
+            git commit -m "[bot] Add video files batch $BATCH_NUM ($(echo $BATCH_FILES | wc -w) files)"
+            
+            # Push after each batch
             git push
-            echo "✅ Committed and pushed successfully"
-          else
-            echo "No changes to commit"
-          fi
+            
+            echo "✅ Batch $BATCH_NUM committed and pushed"
+            BATCH_NUM=$((BATCH_NUM + 1))
+            
+            # Small delay to avoid overwhelming GitHub
+            sleep 2
+          done
+          
+          echo "✅ All $TOTAL_FILES files committed and pushed in batches"
+          rm -f file_list.txt temp_list.txt
 
   # ============================================
   # JOB 2: Send files to Bale bot using README links
@@ -469,9 +507,6 @@ jobs:
           echo "Files in downloaded_files directory:"
           ls -lh downloaded_files/
 
-      # ============================================
-      # Send thumbnail with caption (proper newlines) then files
-      # ============================================
       - name: Send thumbnail with caption and send files to Bale
         run: |
           TOKEN="${{ inputs.bale_token }}"
@@ -479,10 +514,13 @@ jobs:
           LINK_COUNT="${{ env.LINK_COUNT }}"
           VIDEO_TITLE=$(cat video_title.txt 2>/dev/null || echo "Unknown")
           
-          # Build caption with actual newlines using printf
-          CAPTION=$(printf "🎬 *%s*\n\n📦 Found %s link(s)\n⬇️ Downloading and sending..." "$VIDEO_TITLE" "$LINK_COUNT")
+          # Build caption with actual newlines
+          CAPTION="🎬 *${VIDEO_TITLE}*
           
-          # Send thumbnail with caption (ONE message with image + text)
+📦 Found ${LINK_COUNT} link(s)
+⬇️ Downloading and sending..."
+          
+          # Send thumbnail with caption
           if [ -f "thumbnail.jpg" ]; then
             echo "Sending thumbnail with caption..."
             curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendPhoto" \
