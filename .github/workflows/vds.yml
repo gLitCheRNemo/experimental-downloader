@@ -322,29 +322,22 @@ jobs:
           retention-days: 1
 
       # ============================================
-      # FIXED: Commit and Push in Batches of 5
+      # MODIFIED: Commit and Push in Batches of 5
       # ============================================
       - name: Commit and Push in Batches of 5
         run: |
           VIDEO_FOLDER="${{ env.SAFE_NAME }}"
           README_FILE="${{ env.README_NAME }}"
           
-          # Check if folder exists and has files
-          if [ ! -d "$VIDEO_FOLDER" ]; then
-            echo "Video folder not found: $VIDEO_FOLDER"
-            exit 0
-          fi
-          
-          # Store list of files in a temporary file (using find for safety)
-          find "$VIDEO_FOLDER" -maxdepth 1 -type f > file_list.txt 2>/dev/null || true
+          # Store list of files in a temporary file
+          ls "${VIDEO_FOLDER}"/* 2>/dev/null > file_list.txt || true
           
           # Count total files
-          TOTAL_FILES=$(wc -l < file_list.txt)
+          TOTAL_FILES=$(cat file_list.txt | wc -l)
           echo "Total files to commit: $TOTAL_FILES"
           
           if [ "$TOTAL_FILES" -eq 0 ]; then
             echo "No files to commit"
-            rm -f file_list.txt
             exit 0
           fi
           
@@ -353,7 +346,7 @@ jobs:
           BATCH_NUM=1
           
           # Process files in batches
-          while [ $(wc -l < file_list.txt) -gt 0 ]; do
+          while [ $(cat file_list.txt | wc -l) -gt 0 ]; do
             # Take first BATCH_SIZE files
             BATCH_FILES=$(head -n $BATCH_SIZE file_list.txt)
             
@@ -374,8 +367,7 @@ jobs:
             fi
             
             # Commit this batch
-            FILE_COUNT=$(echo "$BATCH_FILES" | wc -w)
-            git commit -m "[bot] Add video files batch $BATCH_NUM ($FILE_COUNT files)"
+            git commit -m "[bot] Add video files batch $BATCH_NUM ($(echo $BATCH_FILES | wc -w) files)"
             
             # Push after each batch
             git push
