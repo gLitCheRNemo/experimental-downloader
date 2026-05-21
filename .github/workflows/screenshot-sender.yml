@@ -1,3 +1,180 @@
+name: Screenshot Sender
+
+on:
+  workflow_dispatch:
+    inputs:
+      website_url:
+        description: '🔗 Website URL to screenshot'
+        required: true
+        type: string
+      output_name:
+        description: '📝 Output file name (without extension)'
+        required: true
+        default: 'screenshot'
+        type: string
+      full_page:
+        description: '📄 Take full-page screenshot (scrolls entire page)'
+        required: false
+        default: true
+        type: boolean
+      screenshot_count:
+        description: '🔢 Number of screenshots to take (1-20)'
+        required: false
+        default: '1'
+        type: string
+      delay_seconds:
+        description: '⏱️ Delay between screenshots (seconds)'
+        required: false
+        default: '0'
+        type: string
+      parts_size:
+        description: '🫙 Parts size (MB)'
+        required: false
+        type: string
+        default: '45'
+      bale_token:
+        description: '🤖 Bale Bot Token (for sending files)'
+        required: true
+        type: string
+      bale_chat_id:
+        description: '💬 Bale Chat ID (for sending files)'
+        required: true
+        type: string
+
+jobs:
+  # ============================================
+  # JOB 1: Take screenshots and create README
+  # ============================================
+  screenshot-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Prepare screenshot branch
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git fetch origin
+
+          if git ls-remote --exit-code --heads origin screenshot; then
+            git checkout screenshot
+            git pull origin screenshot
+          else
+            git checkout --orphan screenshot
+            git rm -rf . || true
+            mkdir -p screenshot
+            git commit --allow-empty -m "[bot] Initialize screenshot branch"
+            git push --set-upstream origin screenshot
+          fi
+
+      - name: Setup Puppeteer
+        run: |
+          mkdir -p screenshot_script
+          cd screenshot_script
+          npm init -y
+          npm install puppeteer
+
+      - name: Take screenshot(s)
+        id: screenshot
+        run: |
+          OUTPUT_NAME="${{ inputs.output_name }}"
+          WEBSITE_URL="${{ inputs.website_url }}"
+          FULL_PAGE="${{ inputs.full_page }}"
+          SCREENSHOT_COUNT="${{ inputs.screenshot_count }}"
+          DELAY_SECONDS="${{ inputs.delay_seconds }}"
+          
+          mkdir -p screenshot
+          
+          cd screenshot_script
+          node << 'EOF'
+          const puppeteer = require('puppeteer');
+          const fs = require('fs');
+          const path = require('path');
+          
+          (async () => {
+            const browser = await puppeteer.launch({
+              args: ['--no-sandbox', '--disable-setuid-sandbox'],
+              headless: 'new'
+            });
+            const page = await browser.newPage();
+            
+            await page.setViewport({ width: 1920, height: 1080 });
+            
+            const url = process.env.WEBSITE_URL;
+            const outputName = process.env.OUTPUT_NAME;
+            const fullPage = process.env.FULL_PAGE === 'true';
+            const screenshotCount = parseInt(process.env.SCREENSHOT_COUNT, 10) || 1;
+            const delaySeconds = parseInt(process.env.DELAY_SECONDS, 10) || 0;
+            
+            console.log(`Navigating to: ${url}`);
+            console.log(`Full-page mode: ${fullPage}`);
+            console.log(`Screenshots to take: ${screenshotCount}`);
+            console.log(`Delay between screenshots: ${delaySeconds}s`);
+            
+            await page.goto(url, { waitUntil: 'networkidle2' });
+            
+            console.log('Waiting 5 seconds for initial page load...');
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            
+            const screenshotDir = path.join('..', 'screenshot');
+            if (!fs.existsSync(screenshotDir)) {
+              fs.mkdirSync(screenshotDir, { recursive: true });
+            }
+            
+            for (let i = 1; i <= screenshotCount; i++) {
+              let filename;
+              if (screenshotCount === 1) {
+                filename = `${outputName}.png`;
+              } else {
+                filename = `${outputName}_${i}.png`;
+              }
+              const filePath = path.join(screenshotDir, filename);
+              
+              console.log(`Taking screenshot ${i}/${screenshotCount}: ${filename}`);
+              
+              if (fullPage) {
+                await page.screenshot({ path: filePath, fullPage: true });
+              } else {
+                await page.screenshot({ path: filePath, fullPage: false });
+              }
+              
+              console.log(`  ✅ Saved: ${filename}`);
+              
+              if (i < screenshotCount && delaySeconds > 0) {
+                console.log(`  ⏱️  Waiting ${delaySeconds} seconds...`);
+                await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
+              }
+            }
+            
+            console.log(`\n✅ All ${screenshotCount} screenshot(s) completed!`);
+            await browser.close();
+          })().catch(err => {
+            console.error('Error:', err);
+            process.exit(1);
+          });
+          EOF
+          
+          SCREENSHOT_COUNT_ACTUAL=$(ls -1 screenshot/*.png 2>/dev/null | wc -l)
+          echo "SCREENSHOT_COUNT_ACTUAL=$SCREENSHOT_COUNT_ACTUAL" >> $GITHUB_ENV
+          echo "✅ Created $SCREENSHOT_COUNT_ACTUAL screenshot(s)"
+        env:
+          WEBSITE_URL: ${{ inputs.website_url }}
+          OUTPUT_NAME: ${{ inputs.output_name }}
+          FULL_PAGE: ${{ inputs.full_page }}
+          SCREENSHOT_COUNT: ${{ inputs.screenshot_count }}
+          DELAY_SECONDS: ${{ inputs.delay_seconds }}
+
+      # ============================================
+      # FIXED: Split screenshot(s) into zip archive(s)
+      # PNGs are moved to a folder first, then zipped
+      # ============================================
       - name: Split screenshot(s) into archives
         id: split
         run: |
@@ -77,3 +254,239 @@
           ls -la
           
           cd ..
+
+      - name: Generate README with Download Links
+        run: |
+          rm -f README.md
+          
+          SCREENSHOT_COUNT="${{ env.SCREENSHOT_COUNT_ACTUAL }}"
+          FULL_PAGE_TEXT="${{ inputs.full_page == 'true' && 'Yes (Full Page)' || 'No (Viewport Only)' }}"
+          
+          echo "# 📸 Screenshot Download Links" > README.md
+          echo "Generated on: $(date)" >> README.md
+          echo "" >> README.md
+          echo "## 📋 Details" >> README.md
+          echo "- **URL:** ${{ inputs.website_url }}" >> README.md
+          echo "- **Full-page mode:** $FULL_PAGE_TEXT" >> README.md
+          echo "- **Screenshots taken:** $SCREENSHOT_COUNT" >> README.md
+          echo "- **Delay between shots:** ${{ inputs.delay_seconds }} seconds" >> README.md
+          echo "" >> README.md
+          echo "## 📥 Download Links" >> README.md
+          
+          for file in screenshot/*; do
+            if [ -f "$file" ]; then
+              filename=$(basename "$file")
+              encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
+              url="https://github.com/${{ github.repository }}/raw/screenshot/screenshot/$encoded_filename"
+              echo "- [Download $filename]($url)" >> README.md
+            fi
+          done
+
+      - name: Commit and Push in Batches of 5
+        run: |
+          ls screenshot/* 2>/dev/null > file_list.txt || true
+          
+          TOTAL_FILES=$(cat file_list.txt | wc -l)
+          echo "Total files to commit: $TOTAL_FILES"
+          
+          if [ "$TOTAL_FILES" -eq 0 ]; then
+            echo "No new files to commit"
+            exit 0
+          fi
+          
+          BATCH_SIZE=5
+          BATCH_NUM=1
+          
+          while [ $(cat file_list.txt | wc -l) -gt 0 ]; do
+            BATCH_FILES=$(head -n $BATCH_SIZE file_list.txt)
+            
+            tail -n +$((BATCH_SIZE + 1)) file_list.txt > temp_list.txt 2>/dev/null || touch temp_list.txt
+            mv temp_list.txt file_list.txt
+            
+            for file in $BATCH_FILES; do
+              if [ -f "$file" ]; then
+                git add "$file"
+              fi
+            done
+            
+            if [ $BATCH_NUM -eq 1 ] && [ -f "README.md" ]; then
+              git add README.md
+            fi
+            
+            git commit -m "[bot] Add screenshot files batch $BATCH_NUM ($(echo $BATCH_FILES | wc -w) files)"
+            git push
+            
+            echo "✅ Batch $BATCH_NUM committed and pushed"
+            BATCH_NUM=$((BATCH_NUM + 1))
+            sleep 2
+          done
+          
+          echo "✅ All $TOTAL_FILES files committed and pushed in batches"
+          rm -f file_list.txt temp_list.txt
+
+      - name: Upload README as artifact for next job
+        uses: actions/upload-artifact@v4
+        with:
+          name: readme-file
+          path: README.md
+          retention-days: 1
+
+  # ============================================
+  # JOB 2: Send files to Bale bot using README links
+  # ============================================
+  send-to-bot:
+    runs-on: ubuntu-latest
+    needs: screenshot-and-release
+    if: always() && needs.screenshot-and-release.result == 'success'
+    
+    steps:
+      - name: Mask sensitive inputs
+        run: |
+          echo "::add-mask::${{ inputs.bale_token }}"
+          echo "::add-mask::${{ inputs.bale_chat_id }}"
+
+      - name: Download README artifact from previous job
+        uses: actions/download-artifact@v4
+        with:
+          name: readme-file
+          path: .
+
+      - name: Extract links from README.md
+        id: extract
+        run: |
+          if [ ! -f "README.md" ]; then
+            echo "❌ README.md not found!"
+            exit 1
+          fi
+          
+          echo "README.md contents:"
+          echo "=========================================="
+          cat README.md
+          echo "=========================================="
+          
+          # Extract all download links from README.md
+          grep -oE 'https://raw\.githubusercontent\.com/[^ )]+' README.md > extracted_links.txt 2>/dev/null || true
+          
+          sort -u extracted_links.txt -o extracted_links.txt
+          sed -i '/^$/d' extracted_links.txt
+          
+          LINK_COUNT=$(wc -l < extracted_links.txt)
+          echo "LINK_COUNT=$LINK_COUNT" >> $GITHUB_ENV
+          
+          echo ""
+          echo "Found $LINK_COUNT links in README.md:"
+          echo "=========================================="
+          cat extracted_links.txt
+          echo "=========================================="
+          
+          if [ "$LINK_COUNT" -eq 0 ]; then
+            echo "❌ No download links found in README.md"
+            exit 1
+          fi
+
+      - name: Download files using wget
+        run: |
+          mkdir -p downloaded_files
+          cd downloaded_files
+          
+          LINK_NUM=1
+          while IFS= read -r LINK; do
+            if [ -n "$LINK" ]; then
+              echo "=========================================="
+              echo "Downloading file $LINK_NUM of ${{ env.LINK_COUNT }} from:"
+              echo "$LINK"
+              echo "=========================================="
+              
+              wget --content-disposition --trust-server-names --max-redirect=5 "$LINK"
+              
+              DOWNLOADED_FILE=$(ls -1 | head -n 1)
+              echo "Downloaded file: $DOWNLOADED_FILE"
+              
+              if [ -f "$DOWNLOADED_FILE" ] && [ -s "$DOWNLOADED_FILE" ]; then
+                SIZE=$(stat -c%s "$DOWNLOADED_FILE")
+                SIZE_MB=$((SIZE / 1024 / 1024))
+                echo "✅ Downloaded: $DOWNLOADED_FILE (${SIZE_MB} MB)"
+                echo "$DOWNLOADED_FILE:SUCCESS:$SIZE" >> ../download_status.txt
+              else
+                echo "❌ Failed to download from: $LINK"
+                echo "unknown:FAILED:0" >> ../download_status.txt
+              fi
+              
+              LINK_NUM=$((LINK_NUM + 1))
+              echo ""
+            fi
+          done < ../extracted_links.txt
+          
+          cd ..
+          
+          echo "Files in downloaded_files directory:"
+          ls -lh downloaded_files/
+
+      - name: Send files to Bale bot
+        run: |
+          TOKEN="${{ inputs.bale_token }}"
+          CHAT_ID="${{ inputs.bale_chat_id }}"
+          LINK_COUNT="${{ env.LINK_COUNT }}"
+          
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=📸 Found ${LINK_COUNT} file part(s) in README.%0A⬇️ Downloading and sending..."
+          
+          cd downloaded_files
+          
+          FILE_NUM=1
+          for FILE in *; do
+            if [ -f "$FILE" ] && [ -s "$FILE" ]; then
+              SIZE=$(stat -c%s "$FILE")
+              SIZE_MB=$((SIZE / 1024 / 1024))
+              
+              echo "Sending file $FILE_NUM: $FILE (${SIZE_MB} MB)"
+              
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+                -F "chat_id=${CHAT_ID}" \
+                -F "document=@${FILE}" \
+                -F "caption=${FILE} | ${SIZE_MB} MB"
+              
+              echo "✅ Sent $FILE"
+              
+              FILE_NUM=$((FILE_NUM + 1))
+              sleep 1
+            fi
+          done
+          
+          cd ..
+          
+          SENT_COUNT=$((FILE_NUM - 1))
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=✅ Done! Sent ${SENT_COUNT} file(s) from ${LINK_COUNT} link(s)."
+
+      - name: Show summary
+        run: |
+          echo "## 📊 Screenshot Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| URL | ${{ inputs.website_url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Full-page mode | ${{ inputs.full_page }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Screenshots requested | ${{ inputs.screenshot_count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Screenshots taken | ${{ env.SCREENSHOT_COUNT_ACTUAL }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Delay between shots | ${{ inputs.delay_seconds }} seconds |" >> $GITHUB_STEP_SUMMARY
+          echo "| Links found in README | ${{ env.LINK_COUNT }} |" >> $GITHUB_STEP_SUMMARY
+          if [ -f "download_status.txt" ]; then
+            SUCCESS_COUNT=$(grep -c ":SUCCESS:" download_status.txt || echo "0")
+            FAILED_COUNT=$(grep -c ":FAILED:" download_status.txt || echo "0")
+            echo "| Successfully downloaded | $SUCCESS_COUNT |" >> $GITHUB_STEP_SUMMARY
+            echo "| Failed downloads | $FAILED_COUNT |" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Extracted links from README.md:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat extracted_links.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup
+        run: |
+          rm -f README.md download_status.txt extracted_links.txt
+          rm -rf downloaded_files
+          echo "🧹 Cleaned up temporary files"
