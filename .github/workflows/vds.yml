@@ -160,7 +160,7 @@ jobs:
           echo "VIDEO_ID=$VIDEO_ID" >> $GITHUB_ENV
 
       # ============================================
-      # NEW: Download thumbnail using direct URL method
+      # Download thumbnail using direct URL method
       # ============================================
       - name: Download thumbnail
         id: thumbnail
@@ -411,7 +411,7 @@ jobs:
           cat "$README_FILE"
           echo "=========================================="
           
-          # Extract all download links from README (using grep -oE for compatibility)
+          # Extract all download links from README
           grep -oE 'https://[^ )]+\.(z[0-9]+|zip)' "$README_FILE" > extracted_links.txt 2>/dev/null || true
           
           sort -u extracted_links.txt -o extracted_links.txt
@@ -470,7 +470,7 @@ jobs:
           ls -lh downloaded_files/
 
       # ============================================
-      # MODIFIED: Send thumbnail first with caption, then files
+      # Send thumbnail with caption (proper newlines) then files
       # ============================================
       - name: Send thumbnail with caption and send files to Bale
         run: |
@@ -479,19 +479,25 @@ jobs:
           LINK_COUNT="${{ env.LINK_COUNT }}"
           VIDEO_TITLE=$(cat video_title.txt 2>/dev/null || echo "Unknown")
           
+          # Build caption with actual newlines (not %0A)
+          CAPTION="🎬 *${VIDEO_TITLE}*
+          
+📦 Found ${LINK_COUNT} link(s)
+⬇️ Downloading and sending..."
+          
           # Send thumbnail with caption (ONE message with image + text)
           if [ -f "thumbnail.jpg" ]; then
             echo "Sending thumbnail with caption..."
             curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendPhoto" \
               -F "chat_id=${CHAT_ID}" \
               -F "photo=@thumbnail.jpg" \
-              -F "caption=🎬 *${VIDEO_TITLE}*%0A%0A📦 Found ${LINK_COUNT} link(s)%0A⬇️ Downloading and sending..." \
+              -F "caption=${CAPTION}" \
               -F "parse_mode=Markdown"
           else
             # Fallback if no thumbnail
             curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
               -d "chat_id=${CHAT_ID}" \
-              -d "text=🎬 *${VIDEO_TITLE}*%0A%0A📦 Found ${LINK_COUNT} link(s)%0A⬇️ Downloading and sending..." \
+              -d "text=🎬 *${VIDEO_TITLE}%0A%0A📦 Found ${LINK_COUNT} link(s)%0A⬇️ Downloading and sending..." \
               -d "parse_mode=Markdown"
           fi
           
