@@ -32,11 +32,6 @@ on:
         required: false
         type: string
         default: '45'
-      password:
-        description: '🔒 Password for archive encryption (optional)'
-        required: false
-        type: string
-        default: ''
       bale_token:
         description: '🤖 Bale Bot Token (for sending files)'
         required: true
@@ -54,7 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -78,11 +73,6 @@ jobs:
             git commit --allow-empty -m "[bot] Initialize screenshot branch"
             git push --set-upstream origin screenshot
           fi
-
-      - name: Install 7-Zip
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y p7zip-full
 
       - name: Setup Puppeteer
         run: |
@@ -185,9 +175,7 @@ jobs:
           DELAY_SECONDS: ${{ inputs.delay_seconds }}
 
       # ============================================
-      # Split screenshot(s) into archives
-      # Uses 7-Zip for password-protected (no corruption)
-      # Uses zip for unencrypted (faster)
+      # Split screenshot(s) into zip archive(s)
       # ============================================
       - name: Split screenshot(s) into archives
         id: split
@@ -197,18 +185,10 @@ jobs:
           OUTPUT_NAME="${{ inputs.output_name }}"
           PARTS_SIZE="${{ inputs.parts_size }}"
           SCREENSHOT_COUNT="${{ env.SCREENSHOT_COUNT_ACTUAL }}"
-          ZIP_PASSWORD="${{ inputs.password }}"
           
           echo "SCREENSHOT_COUNT from env: $SCREENSHOT_COUNT"
           echo "Found PNG file(s) in screenshot folder:"
           ls -la *.png 2>/dev/null || echo "No PNG files found"
-          
-          # Show password status
-          if [ -n "$ZIP_PASSWORD" ]; then
-            echo "🔒 Password protection: ENABLED (using 7-Zip for compatibility)"
-          else
-            echo "🔓 Password protection: DISABLED"
-          fi
           
           # Convert to integer and compare
           if [ "$SCREENSHOT_COUNT" -gt 1 ] 2>/dev/null; then
@@ -233,43 +213,18 @@ jobs:
             echo "Split size limit: ${PARTS_SIZE} MB"
             
             if [ $TOTAL_SIZE_MB -le $PARTS_SIZE ]; then
-              echo "Creating single archive (within size limit)"
-              if [ -n "$ZIP_PASSWORD" ]; then
-                # Use 7-Zip for password protection (handles PNGs correctly)
-                7z a -tzip -p"${ZIP_PASSWORD}" -mx0 "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}_screenshots"
-                echo "✅ Created password-protected: ${OUTPUT_NAME}.zip (7-Zip, store mode)"
-              else
-                zip -0 -r "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}_screenshots"
-                echo "✅ Created: ${OUTPUT_NAME}.zip"
-              fi
+              echo "Creating single ZIP file (within size limit)"
+              zip -0 -r "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}_screenshots"
+              echo "✅ Created: ${OUTPUT_NAME}.zip"
               echo "SINGLE_FILE=true" >> $GITHUB_ENV
             else
-              echo "Creating split archive (exceeds size limit)"
-              if [ -n "$ZIP_PASSWORD" ]; then
-                # For split archives with password, create single 7z then manually split
-                7z a -tzip -p"${ZIP_PASSWORD}" -mx0 "${OUTPUT_NAME}_full.zip" "${OUTPUT_NAME}_screenshots"
-                echo "Split password-protected archive into ${PARTS_SIZE}MB parts..."
-                split -b ${PARTS_SIZE}M "${OUTPUT_NAME}_full.zip" "${OUTPUT_NAME}.z"
-                # Rename split files to match expected pattern
-                COUNTER=1
-                for part in $(ls -1 ${OUTPUT_NAME}.z* | sort); do
-                  if [ $COUNTER -eq 1 ]; then
-                    mv "$part" "${OUTPUT_NAME}.zip"
-                  else
-                    mv "$part" "${OUTPUT_NAME}.z$(printf "%02d" $((COUNTER-1)))"
-                  fi
-                  COUNTER=$((COUNTER + 1))
-                done
-                rm -f "${OUTPUT_NAME}_full.zip"
-                echo "✅ Created password-protected split archive parts"
-              else
-                zip -0 -r -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}_screenshots"
-                echo "✅ Created split archive parts"
-              fi
+              echo "Creating split ZIP archive (exceeds size limit)"
+              zip -0 -r -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}_screenshots"
+              echo "✅ Created split archive parts"
               echo "SINGLE_FILE=false" >> $GITHUB_ENV
             fi
             
-            # Remove the folder after archiving
+            # Remove the folder after zipping
             rm -rf "${OUTPUT_NAME}_screenshots"
             echo "Removed temporary folder"
             
@@ -286,27 +241,13 @@ jobs:
               echo "Split size limit: ${PARTS_SIZE} MB"
               
               if [ $FILE_SIZE_MB -le $PARTS_SIZE ]; then
-                echo "Creating single archive"
-                if [ -n "$ZIP_PASSWORD" ]; then
-                  # Use 7-Zip for password protection (handles PNGs correctly)
-                  7z a -tzip -p"${ZIP_PASSWORD}" -mx0 "${OUTPUT_NAME}.zip" "${PNG_FILE}"
-                  echo "✅ Created password-protected: ${OUTPUT_NAME}.zip (7-Zip, store mode)"
-                else
-                  zip -0 "${OUTPUT_NAME}.zip" "${PNG_FILE}"
-                  echo "✅ Created: ${OUTPUT_NAME}.zip"
-                fi
+                echo "Creating single ZIP file"
+                zip -0 "${OUTPUT_NAME}.zip" "${PNG_FILE}"
                 rm -f "${PNG_FILE}"
                 echo "SINGLE_FILE=true" >> $GITHUB_ENV
               else
-                echo "Creating split archive"
-                if [ -n "$ZIP_PASSWORD" ]; then
-                  # For single large file with password, use 7-Zip with split
-                  7z a -tzip -p"${ZIP_PASSWORD}" -mx0 -v${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${PNG_FILE}"
-                  echo "✅ Created password-protected split archive parts (7-Zip)"
-                else
-                  zip -0 -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${PNG_FILE}"
-                  echo "✅ Created split archive parts"
-                fi
+                echo "Creating split ZIP archive"
+                zip -0 -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${PNG_FILE}"
                 rm -f "${PNG_FILE}"
                 echo "SINGLE_FILE=false" >> $GITHUB_ENV
               fi
@@ -318,31 +259,22 @@ jobs:
           
           # Show what files were created
           echo ""
-          echo "Files in screenshot folder after archiving:"
+          echo "Files in screenshot folder after zipping:"
           ls -la
           
           cd ..
 
       # ============================================
-      # Generate README
+      # Generate README (NO details section)
       # ============================================
       - name: Generate README with Download Links
         run: |
           rm -f README.md
           
-          ZIP_PASSWORD="${{ inputs.password }}"
-          
           echo "# 📸 Screenshot Download Links" > README.md
           echo "Generated on: $(date)" >> README.md
           echo "" >> README.md
           echo "## 📥 Download Links" >> README.md
-          
-          # Add password notice if applicable (NO actual password shown)
-          if [ -n "$ZIP_PASSWORD" ]; then
-            echo "" >> README.md
-            echo "> 🔒 **This archive is password protected.** The password was provided when the workflow was run." >> README.md
-            echo "" >> README.md
-          fi
           
           # Check if screenshot folder has any files
           if [ -d "screenshot" ] && [ "$(ls -A screenshot)" ]; then
@@ -415,20 +347,18 @@ jobs:
 
   # ============================================
   # JOB 2: Send files to Bale bot using README links
+  # FIXED: Using the proven extractor from send-to-bot.yml
   # ============================================
   send-to-bot:
     runs-on: ubuntu-latest
     needs: screenshot-and-release
     if: always() && needs.screenshot-and-release.result == 'success'
-    
+
     steps:
       - name: Mask sensitive inputs
         run: |
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
-          if [ -n "${{ inputs.password }}" ]; then
-            echo "::add-mask::${{ inputs.password }}"
-          fi
 
       - name: Download README artifact from previous job
         uses: actions/download-artifact@v4
@@ -436,7 +366,7 @@ jobs:
           name: readme-file
           path: .
 
-      - name: Extract links from README.md
+      - name: Extract links from README.md (fixed method)
         id: extract
         run: |
           if [ ! -f "README.md" ]; then
@@ -452,7 +382,7 @@ jobs:
           # Clear previous file
           > extracted_links.txt
           
-          # Extract links using both patterns
+          # Extract links using both patterns (from send-to-bot.yml)
           grep -oP '\]\(\Khttps://[^)]+' README.md >> extracted_links.txt 2>/dev/null || true
           grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' README.md >> extracted_links.txt 2>/dev/null || true
           
@@ -518,7 +448,6 @@ jobs:
           CHAT_ID="${{ inputs.bale_chat_id }}"
           LINK_COUNT="${{ env.LINK_COUNT }}"
           
-          # Simple initial message - NO password mention
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
             -d "text=📸 Found ${LINK_COUNT} file part(s) in README.%0A⬇️ Downloading and sending..."
@@ -531,15 +460,12 @@ jobs:
               SIZE=$(stat -c%s "$FILE")
               SIZE_MB=$((SIZE / 1024 / 1024))
               
-              # Simple caption - filename and size only
-              CAPTION="${FILE} | ${SIZE_MB} MB"
-              
               echo "Sending file $FILE_NUM: $FILE (${SIZE_MB} MB)"
               
               curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
                 -F "chat_id=${CHAT_ID}" \
                 -F "document=@${FILE}" \
-                -F "caption=${CAPTION}"
+                -F "caption=${FILE} | ${SIZE_MB} MB"
               
               echo "✅ Sent $FILE"
               
@@ -565,7 +491,6 @@ jobs:
           echo "| Full-page mode | ${{ inputs.full_page }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Screenshots requested | ${{ inputs.screenshot_count }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Delay between shots | ${{ inputs.delay_seconds }} seconds |" >> $GITHUB_STEP_SUMMARY
-          echo "| Password protected | ${{ inputs.password != '' && 'Yes' || 'No' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Links found in README | ${{ env.LINK_COUNT }} |" >> $GITHUB_STEP_SUMMARY
           if [ -f "download_status.txt" ]; then
             SUCCESS_COUNT=$(grep -c ":SUCCESS:" download_status.txt || echo "0")
