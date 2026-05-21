@@ -161,6 +161,9 @@ jobs:
           });
           EOF
           
+          cd ..
+          
+          # Count screenshots and save to GITHUB_ENV
           SCREENSHOT_COUNT_ACTUAL=$(ls -1 screenshot/*.png 2>/dev/null | wc -l)
           echo "SCREENSHOT_COUNT_ACTUAL=$SCREENSHOT_COUNT_ACTUAL" >> $GITHUB_ENV
           echo "✅ Created $SCREENSHOT_COUNT_ACTUAL screenshot(s)"
@@ -173,7 +176,6 @@ jobs:
 
       # ============================================
       # FIXED: Split screenshot(s) into zip archive(s)
-      # PNGs are moved to a folder first, then zipped
       # ============================================
       - name: Split screenshot(s) into archives
         id: split
@@ -184,10 +186,12 @@ jobs:
           PARTS_SIZE="${{ inputs.parts_size }}"
           SCREENSHOT_COUNT="${{ env.SCREENSHOT_COUNT_ACTUAL }}"
           
-          echo "Found $SCREENSHOT_COUNT PNG file(s) in screenshot folder:"
-          ls -la *.png
+          echo "SCREENSHOT_COUNT from env: $SCREENSHOT_COUNT"
+          echo "Found PNG file(s) in screenshot folder:"
+          ls -la *.png 2>/dev/null || echo "No PNG files found"
           
-          if [ "$SCREENSHOT_COUNT" -gt 1 ]; then
+          # Convert to integer and compare
+          if [ "$SCREENSHOT_COUNT" -gt 1 ] 2>/dev/null; then
             echo "=========================================="
             echo "Multiple screenshots detected ($SCREENSHOT_COUNT files)"
             echo "Creating folder: ${OUTPUT_NAME}_screenshots"
@@ -230,21 +234,26 @@ jobs:
             echo "=========================================="
             
             PNG_FILE="${OUTPUT_NAME}.png"
-            FILE_SIZE=$(stat -c%s "$PNG_FILE" 2>/dev/null || echo 0)
-            FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
-            echo "File size: ${FILE_SIZE_MB} MB"
-            echo "Split size limit: ${PARTS_SIZE} MB"
-            
-            if [ $FILE_SIZE_MB -le $PARTS_SIZE ]; then
-              echo "Creating single ZIP file"
-              zip -0 "${OUTPUT_NAME}.zip" "${PNG_FILE}"
-              rm -f "${PNG_FILE}"
-              echo "SINGLE_FILE=true" >> $GITHUB_ENV
+            if [ -f "$PNG_FILE" ]; then
+              FILE_SIZE=$(stat -c%s "$PNG_FILE")
+              FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
+              echo "File size: ${FILE_SIZE_MB} MB"
+              echo "Split size limit: ${PARTS_SIZE} MB"
+              
+              if [ $FILE_SIZE_MB -le $PARTS_SIZE ]; then
+                echo "Creating single ZIP file"
+                zip -0 "${OUTPUT_NAME}.zip" "${PNG_FILE}"
+                rm -f "${PNG_FILE}"
+                echo "SINGLE_FILE=true" >> $GITHUB_ENV
+              else
+                echo "Creating split ZIP archive"
+                zip -0 -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${PNG_FILE}"
+                rm -f "${PNG_FILE}"
+                echo "SINGLE_FILE=false" >> $GITHUB_ENV
+              fi
             else
-              echo "Creating split ZIP archive"
-              zip -0 -s ${PARTS_SIZE}m "${OUTPUT_NAME}.zip" "${PNG_FILE}"
-              rm -f "${PNG_FILE}"
-              echo "SINGLE_FILE=false" >> $GITHUB_ENV
+              echo "ERROR: PNG file $PNG_FILE not found!"
+              exit 1
             fi
           fi
           
@@ -260,6 +269,10 @@ jobs:
           rm -f README.md
           
           SCREENSHOT_COUNT="${{ env.SCREENSHOT_COUNT_ACTUAL }}"
+          if [ -z "$SCREENSHOT_COUNT" ]; then
+            SCREENSHOT_COUNT="1"
+          fi
+          
           FULL_PAGE_TEXT="${{ inputs.full_page == 'true' && 'Yes (Full Page)' || 'No (Viewport Only)' }}"
           
           echo "# 📸 Screenshot Download Links" > README.md
@@ -273,17 +286,28 @@ jobs:
           echo "" >> README.md
           echo "## 📥 Download Links" >> README.md
           
-          for file in screenshot/*; do
-            if [ -f "$file" ]; then
-              filename=$(basename "$file")
-              encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
-              url="https://github.com/${{ github.repository }}/raw/screenshot/screenshot/$encoded_filename"
-              echo "- [Download $filename]($url)" >> README.md
-            fi
-          done
+          # Check if screenshot folder has any files
+          if [ -d "screenshot" ] && [ "$(ls -A screenshot)" ]; then
+            for file in screenshot/*; do
+              if [ -f "$file" ]; then
+                filename=$(basename "$file")
+                encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
+                url="https://github.com/${{ github.repository }}/raw/screenshot/screenshot/$encoded_filename"
+                echo "- [Download $filename]($url)" >> README.md
+              fi
+            done
+          else
+            echo "No screenshot files found to link." >> README.md
+          fi
 
       - name: Commit and Push in Batches of 5
         run: |
+          # Check if screenshot folder exists and has files
+          if [ ! -d "screenshot" ] || [ -z "$(ls -A screenshot)" ]; then
+            echo "No files to commit"
+            exit 0
+          fi
+          
           ls screenshot/* 2>/dev/null > file_list.txt || true
           
           TOTAL_FILES=$(cat file_list.txt | wc -l)
@@ -470,7 +494,6 @@ jobs:
           echo "| URL | ${{ inputs.website_url }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Full-page mode | ${{ inputs.full_page }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Screenshots requested | ${{ inputs.screenshot_count }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Screenshots taken | ${{ env.SCREENSHOT_COUNT_ACTUAL }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Delay between shots | ${{ inputs.delay_seconds }} seconds |" >> $GITHUB_STEP_SUMMARY
           echo "| Links found in README | ${{ env.LINK_COUNT }} |" >> $GITHUB_STEP_SUMMARY
           if [ -f "download_status.txt" ]; then
