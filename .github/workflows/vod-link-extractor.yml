@@ -133,9 +133,7 @@ jobs:
                 console.log(`✅ Found VOD URL: ${videoUrl}`);
                 
                 // Extract the VOD title
-                // Try multiple title selectors within the video card
                 videoTitle = await page.evaluate(() => {
-                  // Look for title in various possible elements
                   const titleSelectors = [
                     '.tw-media-card-title',
                     '.tw-title',
@@ -152,7 +150,6 @@ jobs:
                     }
                   }
                   
-                  // Fallback: look for any heading near the video card
                   const headings = document.querySelectorAll('h2, h3, h4, .tw-title');
                   for (const heading of headings) {
                     const text = heading.textContent.trim();
@@ -216,7 +213,6 @@ jobs:
             exit 1
           fi
           
-          # Set fallback title if empty
           if [ -z "$VOD_TITLE" ]; then
             VOD_TITLE="Untitled VOD"
           fi
@@ -236,21 +232,10 @@ jobs:
           VOD_URL="${{ env.VOD_URL }}"
           VOD_TITLE="${{ env.VOD_TITLE }}"
           CHANNEL_NAME="${{ env.CHANNEL_NAME }}"
-          
-          # Build message with current timestamp
           CURRENT_TIME=$(date '+%Y-%m-%d %H:%M:%S UTC')
           
-          # Escape markdown characters in title
-          VOD_TITLE_ESCAPED=$(echo "$VOD_TITLE" | sed 's/[*_`[]/\\&/g')
-          
-          MESSAGE="🎥 *Twitch Latest VOD Found!*
-          
-📺 **Channel:** ${CHANNEL_NAME}
-📌 **Title:** ${VOD_TITLE_ESCAPED}
-🔗 **Link:** ${VOD_URL}
-🕐 **Fetched:** ${CURRENT_TIME}
-
-⬇️ You can now use this link with your video downloader."
+          # Build message with %0A for line breaks
+          MESSAGE="🎥 *Twitch Latest VOD Found!*%0A%0A📺 **Channel:** ${CHANNEL_NAME}%0A📌 **Title:** ${VOD_TITLE}%0A🔗 **Link:** ${VOD_URL}%0A🕐 **Fetched:** ${CURRENT_TIME}%0A%0A⬇️ You can now use this link with your video downloader."
           
           echo "Sending message to Bale Bot..."
           
@@ -281,10 +266,6 @@ jobs:
           echo "| VOD Title | ${{ env.VOD_TITLE }} |" >> $GITHUB_STEP_SUMMARY
           echo "| VOD URL | ${{ env.VOD_URL }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Status | ✅ Link sent to Bale |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📝 Next Steps" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "You can now use this VOD link with your video downloader workflow." >> $GITHUB_STEP_SUMMARY
 
       - name: Cleanup
         run: |
