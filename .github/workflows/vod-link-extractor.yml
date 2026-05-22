@@ -1,0 +1,293 @@
+name: Twitch Latest VOD Link Extractor
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel_url:
+        description: '🔗 Twitch Channel URL (e.g., https://www.twitch.tv/lirik)'
+        required: true
+        type: string
+      bale_token:
+        description: '🤖 Bale Bot Token (for sending the link)'
+        required: true
+        type: string
+      bale_chat_id:
+        description: '💬 Bale Chat ID (for sending the link)'
+        required: true
+        type: string
+
+jobs:
+  extract-latest-vod:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js and Puppeteer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg
+          # Install Chrome browser
+          wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list'
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+          # Setup Node.js project
+          mkdir -p twitch_script
+          cd twitch_script
+          npm init -y
+          npm install puppeteer
+
+      - name: Extract latest VOD link and title from Twitch channel
+        id: extract
+        run: |
+          CHANNEL_URL="${{ inputs.channel_url }}"
+          
+          cd twitch_script
+          node << 'EOF'
+          const puppeteer = require('puppeteer');
+          
+          (async () => {
+            let browser;
+            try {
+              console.log('🚀 Launching Chrome browser...');
+              browser = await puppeteer.launch({
+                executablePath: '/usr/bin/google-chrome-stable',
+                args: [
+                  '--no-sandbox',
+                  '--disable-setuid-sandbox',
+                  '--disable-dev-shm-usage',
+                  '--disable-gpu',
+                  '--disable-web-security',
+                  '--disable-features=IsolateOrigins,site-per-process'
+                ],
+                headless: 'new'
+              });
+              
+              const page = await browser.newPage();
+              
+              // Set viewport
+              await page.setViewport({ width: 1920, height: 1080 });
+              
+              // Navigate to the channel's videos page
+              const channelUrl = process.env.CHANNEL_URL;
+              const videosUrl = channelUrl.replace(/\/$/, '') + '/videos';
+              
+              console.log(`🌐 Navigating to: ${videosUrl}`);
+              await page.goto(videosUrl, { 
+                waitUntil: 'networkidle2', 
+                timeout: 60000 
+              });
+              
+              console.log('⏳ Waiting 5 seconds for initial page load...');
+              await new Promise(resolve => setTimeout(resolve, 5000));
+              
+              // Scroll down to load more videos
+              console.log('📜 Scrolling down to load videos...');
+              await page.evaluate(() => {
+                window.scrollBy(0, 800);
+              });
+              await new Promise(resolve => setTimeout(resolve, 2000));
+              
+              // Wait for video cards to load
+              console.log('🔍 Waiting for video cards to load...');
+              
+              let videoUrl = null;
+              let videoTitle = null;
+              
+              // Try multiple selectors to find the first video card
+              const videoCardSelectors = [
+                'a[data-test-selector="video-card-link"]',
+                '.tw-link[data-a-target="preview-card-image-link"]',
+                'a[href*="/videos/"]'
+              ];
+              
+              let cardFound = false;
+              for (const selector of videoCardSelectors) {
+                try {
+                  await page.waitForSelector(selector, { timeout: 10000 });
+                  const firstCard = await page.$(selector);
+                  if (firstCard) {
+                    cardFound = true;
+                    console.log(`✅ Found video card with selector: ${selector}`);
+                    break;
+                  }
+                } catch (e) {
+                  // Continue to next selector
+                }
+              }
+              
+              if (!cardFound) {
+                console.error('❌ Could not find any video cards on this channel');
+                process.exit(1);
+              }
+              
+              // Get the first video card (latest VOD)
+              const firstVideoCard = await page.$('a[data-test-selector="video-card-link"], a[href*="/videos/"]');
+              
+              if (firstVideoCard) {
+                // Extract the VOD URL
+                videoUrl = await page.evaluate(el => el.href, firstVideoCard);
+                videoUrl = videoUrl.split('?')[0];
+                console.log(`✅ Found VOD URL: ${videoUrl}`);
+                
+                // Extract the VOD title
+                // Try multiple title selectors within the video card
+                videoTitle = await page.evaluate(() => {
+                  // Look for title in various possible elements
+                  const titleSelectors = [
+                    '.tw-media-card-title',
+                    '.tw-title',
+                    '[data-test-selector="video-card-title"]',
+                    '.tw-core-button-label',
+                    'h3',
+                    '.video-title'
+                  ];
+                  
+                  for (const selector of titleSelectors) {
+                    const titleElement = document.querySelector(selector);
+                    if (titleElement && titleElement.textContent.trim()) {
+                      return titleElement.textContent.trim();
+                    }
+                  }
+                  
+                  // Fallback: look for any heading near the video card
+                  const headings = document.querySelectorAll('h2, h3, h4, .tw-title');
+                  for (const heading of headings) {
+                    const text = heading.textContent.trim();
+                    if (text && text.length > 2 && text.length < 200) {
+                      return text;
+                    }
+                  }
+                  
+                  return null;
+                });
+                
+                if (videoTitle) {
+                  console.log(`✅ Found VOD title: ${videoTitle}`);
+                } else {
+                  console.log('⚠️ Could not extract VOD title, using fallback');
+                  videoTitle = 'Untitled VOD';
+                }
+              }
+              
+              if (!videoUrl) {
+                console.error('❌ Could not find any videos on this channel');
+                process.exit(1);
+              }
+              
+              // Save to files
+              const fs = require('fs');
+              fs.writeFileSync('/tmp/latest_vod_url.txt', videoUrl);
+              fs.writeFileSync('/tmp/vod_title.txt', videoTitle || 'Untitled VOD');
+              
+              // Extract channel name
+              const channelName = channelUrl.replace(/\/$/, '').split('/').pop();
+              fs.writeFileSync('/tmp/channel_name.txt', channelName);
+              
+              console.log('\n📋 Extracted Information:');
+              console.log(`   Channel: ${channelName}`);
+              console.log(`   Title: ${videoTitle}`);
+              console.log(`   URL: ${videoUrl}`);
+              console.log('\n✅ Successfully extracted latest VOD!');
+              
+            } catch (error) {
+              console.error('❌ Error:', error.message);
+              process.exit(1);
+            } finally {
+              if (browser) {
+                await browser.close();
+                console.log('🔒 Browser closed.');
+              }
+            }
+          })();
+          EOF
+          
+          cd ..
+          
+          # Read the extracted data
+          VOD_URL=$(cat /tmp/latest_vod_url.txt 2>/dev/null)
+          VOD_TITLE=$(cat /tmp/vod_title.txt 2>/dev/null)
+          CHANNEL_NAME=$(cat /tmp/channel_name.txt 2>/dev/null)
+          
+          if [ -z "$VOD_URL" ]; then
+            echo "❌ Failed to extract VOD URL"
+            exit 1
+          fi
+          
+          # Set fallback title if empty
+          if [ -z "$VOD_TITLE" ]; then
+            VOD_TITLE="Untitled VOD"
+          fi
+          
+          echo "VOD_URL=$VOD_URL" >> $GITHUB_ENV
+          echo "VOD_TITLE=$VOD_TITLE" >> $GITHUB_ENV
+          echo "CHANNEL_NAME=$CHANNEL_NAME" >> $GITHUB_ENV
+          
+          echo "✅ Extracted VOD URL: $VOD_URL"
+          echo "✅ VOD Title: $VOD_TITLE"
+          echo "✅ Channel: $CHANNEL_NAME"
+
+      - name: Send VOD link with title to Bale bot
+        run: |
+          TOKEN="${{ inputs.bale_token }}"
+          CHAT_ID="${{ inputs.bale_chat_id }}"
+          VOD_URL="${{ env.VOD_URL }}"
+          VOD_TITLE="${{ env.VOD_TITLE }}"
+          CHANNEL_NAME="${{ env.CHANNEL_NAME }}"
+          
+          # Build message with current timestamp
+          CURRENT_TIME=$(date '+%Y-%m-%d %H:%M:%S UTC')
+          
+          # Escape markdown characters in title
+          VOD_TITLE_ESCAPED=$(echo "$VOD_TITLE" | sed 's/[*_`[]/\\&/g')
+          
+          MESSAGE="🎥 *Twitch Latest VOD Found!*
+          
+📺 **Channel:** ${CHANNEL_NAME}
+📌 **Title:** ${VOD_TITLE_ESCAPED}
+🔗 **Link:** ${VOD_URL}
+🕐 **Fetched:** ${CURRENT_TIME}
+
+⬇️ You can now use this link with your video downloader."
+          
+          echo "Sending message to Bale Bot..."
+          
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=${MESSAGE}" \
+            -d "parse_mode=Markdown")
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          if [ "$HTTP_CODE" -eq 200 ]; then
+            echo "✅ VOD link and title sent successfully to Bale!"
+          else
+            echo "❌ Failed to send message to Bale. HTTP code: $HTTP_CODE"
+            echo "Response: $BODY"
+            exit 1
+          fi
+
+      - name: Show summary
+        run: |
+          echo "## 📊 Twitch Latest VOD Extractor Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Channel URL | ${{ inputs.channel_url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Channel Name | ${{ env.CHANNEL_NAME }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| VOD Title | ${{ env.VOD_TITLE }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| VOD URL | ${{ env.VOD_URL }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ✅ Link sent to Bale |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📝 Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "You can now use this VOD link with your video downloader workflow." >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup
+        run: |
+          rm -f /tmp/latest_vod_url.txt /tmp/vod_title.txt /tmp/channel_name.txt
+          rm -rf twitch_script
+          echo "🧹 Cleaned up temporary files"
