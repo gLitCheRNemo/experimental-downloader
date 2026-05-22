@@ -1,4 +1,4 @@
-name: Screenshot Sender
+name: 5- Screenshot Sender
 
 on:
   workflow_dispatch:
