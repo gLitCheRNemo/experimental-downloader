@@ -21,6 +21,12 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
+      - name: Mask sensitive inputs
+        run: |
+          echo "::add-mask::${{ inputs.bale_token }}"
+          echo "::add-mask::${{ inputs.bale_chat_id }}"
+          echo "✅ Sensitive inputs masked"
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -71,8 +77,10 @@ jobs:
               await page.setViewport({ width: 1920, height: 1080 });
               
               // Navigate to the channel's videos page
-              const channelUrl = process.env.CHANNEL_URL;
-              const videosUrl = channelUrl.replace(/\/$/, '') + '/videos';
+              let channelUrl = process.env.CHANNEL_URL;
+              // Remove trailing slash and ensure correct format
+              channelUrl = channelUrl.replace(/\/$/, '');
+              const videosUrl = channelUrl + '/videos';
               
               console.log(`🌐 Navigating to: ${videosUrl}`);
               await page.goto(videosUrl, { 
@@ -80,107 +88,168 @@ jobs:
                 timeout: 60000 
               });
               
-              console.log('⏳ Waiting 5 seconds for initial page load...');
-              await new Promise(resolve => setTimeout(resolve, 5000));
+              console.log('⏳ Waiting 8 seconds for page to fully load...');
+              await new Promise(resolve => setTimeout(resolve, 8000));
               
-              // Scroll down to load more videos
+              // Take a screenshot for debugging (optional)
+              await page.screenshot({ path: '/tmp/twitch_page.png' });
+              console.log('📸 Saved page screenshot to /tmp/twitch_page.png');
+              
+              // Scroll down multiple times to load more videos
               console.log('📜 Scrolling down to load videos...');
-              await page.evaluate(() => {
-                window.scrollBy(0, 800);
-              });
-              await new Promise(resolve => setTimeout(resolve, 2000));
+              for (let i = 0; i < 3; i++) {
+                await page.evaluate(() => {
+                  window.scrollBy(0, 600);
+                });
+                await new Promise(resolve => setTimeout(resolve, 1500));
+              }
               
-              // Wait for video cards to load
-              console.log('🔍 Waiting for video cards to load...');
+              // Get page HTML for debugging (first 500 chars)
+              const html = await page.content();
+              console.log('📄 Page HTML snippet:', html.substring(0, 500));
               
+              // Try multiple methods to find the latest VOD
               let videoUrl = null;
               let videoTitle = null;
               
-              // Try multiple selectors to find the first video card
-              const videoCardSelectors = [
-                'a[data-test-selector="video-card-link"]',
-                '.tw-link[data-a-target="preview-card-image-link"]',
-                'a[href*="/videos/"]'
-              ];
+              // METHOD 1: Look for video links in the page
+              console.log('🔍 METHOD 1: Searching for video links...');
+              const allLinks = await page.$$eval('a', links => 
+                links.map(a => a.href).filter(href => href && href.includes('/videos/') && !href.includes('/videos?'))
+              );
               
-              let cardFound = false;
-              for (const selector of videoCardSelectors) {
-                try {
-                  await page.waitForSelector(selector, { timeout: 10000 });
-                  const firstCard = await page.$(selector);
-                  if (firstCard) {
-                    cardFound = true;
-                    console.log(`✅ Found video card with selector: ${selector}`);
-                    break;
+              if (allLinks.length > 0) {
+                videoUrl = allLinks[0];
+                console.log(`✅ Found video link: ${videoUrl}`);
+              }
+              
+              // METHOD 2: Look for specific Twitch video card selectors
+              if (!videoUrl) {
+                console.log('🔍 METHOD 2: Trying Twitch-specific selectors...');
+                const selectors = [
+                  'a[data-test-selector="video-card-link"]',
+                  'a[data-a-target="preview-card-image-link"]',
+                  '.tw-link[href*="/videos/"]',
+                  'a[href*="/videos/"]'
+                ];
+                
+                for (const selector of selectors) {
+                  try {
+                    const element = await page.$(selector);
+                    if (element) {
+                      videoUrl = await page.evaluate(el => el.href, element);
+                      videoUrl = videoUrl.split('?')[0];
+                      console.log(`✅ Found video with selector ${selector}: ${videoUrl}`);
+                      break;
+                    }
+                  } catch (e) {
+                    // Continue
                   }
-                } catch (e) {
-                  // Continue to next selector
                 }
               }
               
-              if (!cardFound) {
-                console.error('❌ Could not find any video cards on this channel');
-                process.exit(1);
-              }
-              
-              // Get the first video card (latest VOD)
-              const firstVideoCard = await page.$('a[data-test-selector="video-card-link"], a[href*="/videos/"]');
-              
-              if (firstVideoCard) {
-                // Extract the VOD URL
-                videoUrl = await page.evaluate(el => el.href, firstVideoCard);
-                videoUrl = videoUrl.split('?')[0];
-                console.log(`✅ Found VOD URL: ${videoUrl}`);
-                
-                // Extract the VOD title
-                videoTitle = await page.evaluate(() => {
-                  const titleSelectors = [
-                    '.tw-media-card-title',
-                    '.tw-title',
-                    '[data-test-selector="video-card-title"]',
-                    '.tw-core-button-label',
-                    'h3',
-                    '.video-title'
-                  ];
-                  
-                  for (const selector of titleSelectors) {
-                    const titleElement = document.querySelector(selector);
-                    if (titleElement && titleElement.textContent.trim()) {
-                      return titleElement.textContent.trim();
+              // METHOD 3: Extract from JavaScript-rendered content
+              if (!videoUrl) {
+                console.log('🔍 METHOD 3: Extracting from rendered content...');
+                videoUrl = await page.evaluate(() => {
+                  // Look for any element containing a video link
+                  const videoElements = document.querySelectorAll('[href*="/videos/"]');
+                  for (const el of videoElements) {
+                    const href = el.getAttribute('href');
+                    if (href && href.includes('/videos/') && !href.includes('/videos?') && !href.includes('/videos/#')) {
+                      return href.startsWith('http') ? href : 'https://www.twitch.tv' + href;
                     }
                   }
-                  
-                  const headings = document.querySelectorAll('h2, h3, h4, .tw-title');
-                  for (const heading of headings) {
-                    const text = heading.textContent.trim();
-                    if (text && text.length > 2 && text.length < 200) {
-                      return text;
-                    }
-                  }
-                  
                   return null;
                 });
-                
-                if (videoTitle) {
-                  console.log(`✅ Found VOD title: ${videoTitle}`);
-                } else {
-                  console.log('⚠️ Could not extract VOD title, using fallback');
-                  videoTitle = 'Untitled VOD';
+                if (videoUrl) {
+                  console.log(`✅ Found video via JS evaluation: ${videoUrl}`);
                 }
               }
               
               if (!videoUrl) {
                 console.error('❌ Could not find any videos on this channel');
+                console.log('Debug info:');
+                console.log(`Channel URL: ${channelUrl}`);
+                console.log(`Videos URL: ${videosUrl}`);
+                console.log(`Number of links found with /videos/: ${allLinks.length}`);
+                if (allLinks.length > 0) {
+                  console.log('First 5 video links found:', allLinks.slice(0, 5));
+                }
                 process.exit(1);
               }
+              
+              // Extract VOD title
+              console.log('🔍 Extracting VOD title...');
+              try {
+                // Navigate to the VOD page to get the title (more reliable)
+                console.log(`🌐 Navigating to VOD page: ${videoUrl}`);
+                await page.goto(videoUrl, { 
+                  waitUntil: 'networkidle2', 
+                  timeout: 60000 
+                });
+                await new Promise(resolve => setTimeout(resolve, 5000));
+                
+                // Try multiple title selectors on the VOD page
+                const titleSelectors = [
+                  '[data-test-selector="video-title"]',
+                  '.tw-title',
+                  'h1',
+                  '.video-title',
+                  '[data-a-target="video-title"]',
+                  '.core-player-title'
+                ];
+                
+                for (const selector of titleSelectors) {
+                  try {
+                    const titleElement = await page.$(selector);
+                    if (titleElement) {
+                      videoTitle = await page.evaluate(el => el.textContent.trim(), titleElement);
+                      if (videoTitle && videoTitle.length > 0) {
+                        console.log(`✅ Found title with selector ${selector}: ${videoTitle}`);
+                        break;
+                      }
+                    }
+                  } catch (e) {
+                    // Continue
+                  }
+                }
+                
+                // Also try to get title from page metadata
+                if (!videoTitle) {
+                  videoTitle = await page.evaluate(() => {
+                    const ogTitle = document.querySelector('meta[property="og:title"]');
+                    if (ogTitle) return ogTitle.getAttribute('content');
+                    const twitterTitle = document.querySelector('meta[name="twitter:title"]');
+                    if (twitterTitle) return twitterTitle.getAttribute('content');
+                    return document.title;
+                  });
+                  if (videoTitle) {
+                    // Clean up Twitch-specific suffixes
+                    videoTitle = videoTitle.replace(' - Twitch', '').trim();
+                    console.log(`✅ Found title from metadata: ${videoTitle}`);
+                  }
+                }
+              } catch (err) {
+                console.log(`⚠️ Could not navigate to VOD page: ${err.message}`);
+              }
+              
+              if (!videoTitle) {
+                videoTitle = 'Untitled VOD';
+                console.log('⚠️ Using fallback title');
+              }
+              
+              // Clean up title (remove extra whitespace)
+              videoTitle = videoTitle.replace(/\s+/g, ' ').trim();
               
               // Save to files
               const fs = require('fs');
               fs.writeFileSync('/tmp/latest_vod_url.txt', videoUrl);
-              fs.writeFileSync('/tmp/vod_title.txt', videoTitle || 'Untitled VOD');
+              fs.writeFileSync('/tmp/vod_title.txt', videoTitle);
               
-              // Extract channel name
-              const channelName = channelUrl.replace(/\/$/, '').split('/').pop();
+              // Extract channel name from URL
+              const channelNameMatch = channelUrl.match(/(?:twitch\.tv\/)([^\/?]+)/);
+              const channelName = channelNameMatch ? channelNameMatch[1] : 'Unknown';
               fs.writeFileSync('/tmp/channel_name.txt', channelName);
               
               console.log('\n📋 Extracted Information:');
@@ -210,11 +279,16 @@ jobs:
           
           if [ -z "$VOD_URL" ]; then
             echo "❌ Failed to extract VOD URL"
+            echo "Check the debug output above for more information"
             exit 1
           fi
           
           if [ -z "$VOD_TITLE" ]; then
             VOD_TITLE="Untitled VOD"
+          fi
+          
+          if [ -z "$CHANNEL_NAME" ]; then
+            CHANNEL_NAME="Unknown"
           fi
           
           echo "VOD_URL=$VOD_URL" >> $GITHUB_ENV
@@ -234,8 +308,11 @@ jobs:
           CHANNEL_NAME="${{ env.CHANNEL_NAME }}"
           CURRENT_TIME=$(date '+%Y-%m-%d %H:%M:%S UTC')
           
+          # URL encode the VOD title for safety
+          ENCODED_TITLE=$(echo "$VOD_TITLE" | sed 's/ /%20/g; s/&/%26/g; s/#/%23/g')
+          
           # Build message with %0A for line breaks
-          MESSAGE="🎥 *Twitch Latest VOD Found!*%0A%0A📺 **Channel:** ${CHANNEL_NAME}%0A📌 **Title:** ${VOD_TITLE}%0A🔗 **Link:** ${VOD_URL}%0A🕐 **Fetched:** ${CURRENT_TIME}%0A%0A⬇️ You can now use this link with your video downloader."
+          MESSAGE="🎵 *Twitch Latest VOD Found!*%0A%0A📺 **Channel:** ${CHANNEL_NAME}%0A📌 **Title:** ${ENCODED_TITLE}%0A🔗 **Link:** ${VOD_URL}%0A🕐 **Fetched:** ${CURRENT_TIME}%0A%0A⬇️ You can now use this link with your video downloader."
           
           echo "Sending message to Bale Bot..."
           
@@ -255,6 +332,14 @@ jobs:
             exit 1
           fi
 
+      - name: Upload debug screenshot (if extraction failed)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: twitch-debug-screenshot
+          path: /tmp/twitch_page.png
+          retention-days: 7
+
       - name: Show summary
         run: |
           echo "## 📊 Twitch Latest VOD Extractor Summary" >> $GITHUB_STEP_SUMMARY
@@ -269,6 +354,6 @@ jobs:
 
       - name: Cleanup
         run: |
-          rm -f /tmp/latest_vod_url.txt /tmp/vod_title.txt /tmp/channel_name.txt
+          rm -f /tmp/latest_vod_url.txt /tmp/vod_title.txt /tmp/channel_name.txt /tmp/twitch_page.png
           rm -rf twitch_script
           echo "🧹 Cleaned up temporary files"
