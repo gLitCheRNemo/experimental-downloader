@@ -21,7 +21,7 @@ on:
           - 480
           - audio
       time_range:
-        description: '⏱️ Time range to download (e.g., *5:30-7:45 or *00:05:30-00:07:45). Include the * prefix. Leave empty for full video.'
+        description: '⏱️ Time range (e.g., *5:30-7:45 or *00:05:30-00:07:45). Include * prefix. Empty = full video.'
         required: false
         type: string
         default: ''
@@ -148,19 +148,34 @@ jobs:
           
           # Download based on whether time range is provided
           if [ -n "$TIME_RANGE" ]; then
+            echo "=========================================="
             echo "Time range provided: $TIME_RANGE"
-            yt-dlp --remote-components ejs:github \
-                   --proxy "socks5://127.0.0.1:1080" \
-                   $FORMAT_OPTS \
-                   --download-sections "$TIME_RANGE" \
-                   --force-keyframes-at-cuts \
-                   "${{ inputs.youtube_url }}"
+            echo "=========================================="
+            
+            # Remove the * prefix for processing if present
+            CLEAN_RANGE="${TIME_RANGE#\*}"
+            START_TIME=$(echo "$CLEAN_RANGE" | cut -d'-' -f1)
+            END_TIME=$(echo "$CLEAN_RANGE" | cut -d'-' -f2)
+            
+            echo "Start: $START_TIME, End: $END_TIME"
+            
+            # Ensure the * prefix is added back for yt-dlp
+            yt-dlp \
+              --remote-components ejs:github \
+              --proxy "socks5://127.0.0.1:1080" \
+              $FORMAT_OPTS \
+              --download-sections "*${START_TIME}-${END_TIME}" \
+              --force-keyframes-at-cuts \
+              "${{ inputs.youtube_url }}"
           else
+            echo "=========================================="
             echo "Downloading full video"
-            yt-dlp --remote-components ejs:github \
-                   --proxy "socks5://127.0.0.1:1080" \
-                   $FORMAT_OPTS \
-                   "${{ inputs.youtube_url }}"
+            echo "=========================================="
+            yt-dlp \
+              --remote-components ejs:github \
+              --proxy "socks5://127.0.0.1:1080" \
+              $FORMAT_OPTS \
+              "${{ inputs.youtube_url }}"
           fi
 
           # Find the downloaded file
@@ -299,7 +314,8 @@ jobs:
           echo "# 📥 Download Links - ${VIDEO_TITLE}" > "$README_NAME"
           echo "Generated on: $(date)" >> "$README_NAME"
           if [ -n "$TIME_RANGE" ]; then
-            echo "**Time range:** ${TIME_RANGE}" >> "$README_NAME"
+            echo "" >> "$README_NAME"
+            echo "**⏱️ Time range:** \`${TIME_RANGE}\`" >> "$README_NAME"
           fi
           echo "" >> "$README_NAME"
           
@@ -548,11 +564,18 @@ jobs:
           CHAT_ID="${{ inputs.bale_chat_id }}"
           LINK_COUNT="${{ env.LINK_COUNT }}"
           VIDEO_TITLE=$(cat video_title.txt 2>/dev/null || echo "Unknown")
+          TIME_RANGE="${{ inputs.time_range }}"
           
-          # Send thumbnail with caption using printf to handle newlines safely
+          # Build caption with time range info if provided
+          if [ -n "$TIME_RANGE" ]; then
+            CAPTION=$(printf "🎬 *%s*\n⏱️ Time range: %s\n\n📦 Found %s link(s)\n⬇️ Downloading and sending..." "$VIDEO_TITLE" "$TIME_RANGE" "$LINK_COUNT")
+          else
+            CAPTION=$(printf "🎬 *%s*\n\n📦 Found %s link(s)\n⬇️ Downloading and sending..." "$VIDEO_TITLE" "$LINK_COUNT")
+          fi
+          
+          # Send thumbnail with caption
           if [ -f "thumbnail.jpg" ]; then
             echo "Sending thumbnail with caption..."
-            CAPTION=$(printf "🎬 *%s*\n\n📦 Found %s link(s)\n⬇️ Downloading and sending..." "$VIDEO_TITLE" "$LINK_COUNT")
             curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendPhoto" \
               -F "chat_id=${CHAT_ID}" \
               -F "photo=@thumbnail.jpg" \
@@ -560,10 +583,17 @@ jobs:
               -F "parse_mode=Markdown"
           else
             # Fallback if no thumbnail
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-              -d "chat_id=${CHAT_ID}" \
-              -d "text=🎬 *${VIDEO_TITLE}%0A%0A📦 Found ${LINK_COUNT} link(s)%0A⬇️ Downloading and sending..." \
-              -d "parse_mode=Markdown"
+            if [ -n "$TIME_RANGE" ]; then
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+                -d "chat_id=${CHAT_ID}" \
+                -d "text=🎬 *${VIDEO_TITLE}%0A⏱️ Time range: ${TIME_RANGE}%0A%0A📦 Found ${LINK_COUNT} link(s)%0A⬇️ Downloading and sending..." \
+                -d "parse_mode=Markdown"
+            else
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+                -d "chat_id=${CHAT_ID}" \
+                -d "text=🎬 *${VIDEO_TITLE}%0A%0A📦 Found ${LINK_COUNT} link(s)%0A⬇️ Downloading and sending..." \
+                -d "parse_mode=Markdown"
+            fi
           fi
           
           # Send all downloaded files
