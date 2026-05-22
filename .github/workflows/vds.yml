@@ -21,7 +21,7 @@ on:
           - 480
           - audio
       time_range:
-        description: '⏱️ Time range (e.g., *5:30-7:45 or *00:05:30-00:07:45). Include * prefix. Empty = full video.'
+        description: '⏱️ Time range (e.g., *1:30-3:45 or 1:30-3:45). Empty = full video.'
         required: false
         type: string
         default: ''
@@ -152,21 +152,34 @@ jobs:
             echo "Time range provided: $TIME_RANGE"
             echo "=========================================="
             
-            # Remove the * prefix for processing if present
+            # Remove the * prefix if present
             CLEAN_RANGE="${TIME_RANGE#\*}"
             START_TIME=$(echo "$CLEAN_RANGE" | cut -d'-' -f1)
             END_TIME=$(echo "$CLEAN_RANGE" | cut -d'-' -f2)
             
             echo "Start: $START_TIME, End: $END_TIME"
             
-            # Ensure the * prefix is added back for yt-dlp
-            yt-dlp \
+            # METHOD 1: Try --download-sections first (works on some versions)
+            echo "Attempting --download-sections method..."
+            if yt-dlp \
               --remote-components ejs:github \
               --proxy "socks5://127.0.0.1:1080" \
               $FORMAT_OPTS \
               --download-sections "*${START_TIME}-${END_TIME}" \
               --force-keyframes-at-cuts \
-              "${{ inputs.youtube_url }}"
+              "${{ inputs.youtube_url }}"; then
+              echo "✅ --download-sections succeeded"
+            else
+              echo "⚠️ --download-sections failed, falling back to FFmpeg method..."
+              # METHOD 2: Fallback to FFmpeg direct download (more reliable)
+              yt-dlp \
+                --remote-components ejs:github \
+                --proxy "socks5://127.0.0.1:1080" \
+                $FORMAT_OPTS \
+                --downloader ffmpeg \
+                --downloader-args "ffmpeg_i:-ss ${START_TIME} -to ${END_TIME}" \
+                "${{ inputs.youtube_url }}"
+            fi
           else
             echo "=========================================="
             echo "Downloading full video"
