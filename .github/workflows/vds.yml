@@ -322,7 +322,7 @@ jobs:
           retention-days: 1
 
       # ============================================
-      # Commit and Push in Batches of 5
+      # FIXED: Commit and Push in Batches of 5
       # ============================================
       - name: Commit and Push in Batches of 5
         run: |
@@ -516,8 +516,7 @@ jobs:
           ls -lh downloaded_files/
 
       # ============================================
-      # Send thumbnail with caption and send files to Bale
-      # MODIFIED: Added file extension to caption (.z01, .z02, .zip)
+      # FIXED: Send thumbnail with caption (no line break syntax error)
       # ============================================
       - name: Send thumbnail with caption and send files to Bale
         run: |
@@ -552,20 +551,12 @@ jobs:
               SIZE=$(stat -c%s "$FILE")
               SIZE_MB=$((SIZE / 1024 / 1024))
               
-              # Extract file extension (z01, z02, zip, etc.) and add the dot
-              EXTENSION="${FILE##*.}"
-              if [ -n "$EXTENSION" ]; then
-                EXTENSION=".${EXTENSION}"
-              else
-                EXTENSION=""
-              fi
-              
-              echo "Sending file $FILE_NUM: $FILE (${SIZE_MB}MB)${EXTENSION}"
+              echo "Sending file $FILE_NUM: $FILE (${SIZE_MB}MB)"
               
               curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
                 -F "chat_id=${CHAT_ID}" \
                 -F "document=@${FILE}" \
-                -F "caption=${FILE} | ${SIZE_MB}MB ${EXTENSION}"
+                -F "caption=${FILE} | ${SIZE_MB}MB"
               
               echo "✅ Sent $FILE"
               
