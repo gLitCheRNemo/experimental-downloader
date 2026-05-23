@@ -1,0 +1,552 @@
+name: 1- Photo Downloader & Sender
+
+on:
+  workflow_dispatch:
+    inputs:
+      gallery_url:
+        description: '🔗 Gallery/Profile URL (Instagram, Twitter, Reddit, Pixiv, etc.)'
+        required: true
+        type: string
+      download_mode:
+        description: '📦 Download mode'
+        required: true
+        default: 'single'
+        type: choice
+        options:
+          - single
+          - album
+          - profile
+      range_start:
+        description: '🔢 Start range (for profile mode, e.g., 1)'
+        required: false
+        type: string
+        default: ''
+      range_end:
+        description: '🔢 End range (for profile mode, e.g., 50)'
+        required: false
+        type: string
+        default: ''
+      parts_size:
+        description: '🫙 Parts size (MB)'
+        required: false
+        type: string
+        default: '45'
+      cookies_file:
+        description: '🍪 Path to cookies.txt file (optional, for Instagram/Twitter)'
+        required: false
+        type: string
+        default: ''
+      bale_token:
+        description: '🤖 Bale Bot Token (for sending files)'
+        required: true
+        type: string
+      bale_chat_id:
+        description: '💬 Bale Chat ID (for sending files)'
+        required: true
+        type: string
+
+jobs:
+  # ============================================
+  # JOB 1: Download photos and create README
+  # ============================================
+  download-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Prepare photos branch
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git fetch origin
+
+          if git ls-remote --exit-code --heads origin photos; then
+            git checkout photos
+            git pull origin photos
+          else
+            git checkout --orphan photos
+            git rm -rf . || true
+            git commit --allow-empty -m "[bot] Initialize photos branch"
+            git push --set-upstream origin photos
+          fi
+
+      - name: Setup gallery-dl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip wget
+          pip install gallery-dl --upgrade
+
+      - name: Download photos
+        id: download
+        run: |
+          GALLERY_URL="${{ inputs.gallery_url }}"
+          DOWNLOAD_MODE="${{ inputs.download_mode }}"
+          RANGE_START="${{ inputs.range_start }}"
+          RANGE_END="${{ inputs.range_end }}"
+          COOKIES_FILE="${{ inputs.cookies_file }}"
+          
+          mkdir -p tmp_photos
+          cd tmp_photos
+          
+          echo "=========================================="
+          echo "Downloading from: $GALLERY_URL"
+          echo "Mode: $DOWNLOAD_MODE"
+          echo "=========================================="
+          
+          # Build gallery-dl command base
+          CMD="gallery-dl"
+          
+          # Add cookies if provided
+          if [ -n "$COOKIES_FILE" ] && [ -f "$COOKIES_FILE" ]; then
+            echo "Using cookies from: $COOKIES_FILE"
+            CMD="$CMD --cookies \"$COOKIES_FILE\""
+          fi
+          
+          # Add range for profile mode
+          if [ "$DOWNLOAD_MODE" = "profile" ] && [ -n "$RANGE_START" ] && [ -n "$RANGE_END" ]; then
+            echo "Downloading posts $RANGE_START to $RANGE_END from profile..."
+            CMD="$CMD --option \"range=$RANGE_START-$RANGE_END\""
+          elif [ "$DOWNLOAD_MODE" = "profile" ]; then
+            echo "Downloading all posts from profile..."
+          elif [ "$DOWNLOAD_MODE" = "single" ]; then
+            echo "Downloading single post..."
+          elif [ "$DOWNLOAD_MODE" = "album" ]; then
+            echo "Downloading entire album/gallery..."
+          fi
+          
+          # Execute gallery-dl (destination is current directory)
+          eval "$CMD --destination ./ \"$GALLERY_URL\""
+          
+          # Find all downloaded image files and move to flat structure
+          find . -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.gif" -o -iname "*.webp" -o -iname "*.bmp" \) -exec mv -n {} ./ \; 2>/dev/null || true
+          
+          # Remove empty directories
+          find . -type d -empty -delete 2>/dev/null || true
+          
+          # Count downloaded files
+          FILE_COUNT=$(ls -1 *.jpg *.jpeg *.png *.gif *.webp *.bmp 2>/dev/null | wc -l)
+          
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "❌ No files were downloaded!"
+            echo "Check if the URL is valid and accessible"
+            echo "For Instagram/Twitter, you may need to provide cookies"
+            exit 1
+          fi
+          
+          echo "✅ Downloaded $FILE_COUNT photo(s)"
+          echo "FILE_COUNT=$FILE_COUNT" >> $GITHUB_ENV
+          
+          # Create a name based on the URL or first file
+          SAFE_NAME=$(echo "$GALLERY_URL" | sed 's|https\?://||' | sed 's|/|_|g' | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_' | sed 's/^_//;s/_$//' | cut -c1-50)
+          echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
+          
+          echo "----------------------------------------"
+          echo "Downloaded files:"
+          ls -la
+
+      - name: Create photo folder and split files
+        id: split
+        run: |
+          PHOTO_FOLDER="${{ env.SAFE_NAME }}"
+          mkdir -p "$PHOTO_FOLDER"
+          cd tmp_photos
+          
+          # Check if multiple files or single
+          FILE_COUNT=$(ls -1 *.jpg *.jpeg *.png *.gif *.webp *.bmp 2>/dev/null | wc -l)
+          
+          if [ "$FILE_COUNT" -eq 1 ]; then
+            # Single file - just move it
+            SINGLE_FILE=$(ls -1 *.jpg *.jpeg *.png *.gif *.webp *.bmp 2>/dev/null | head -1)
+            echo "Single photo detected: $SINGLE_FILE"
+            mv "$SINGLE_FILE" "../${PHOTO_FOLDER}/${SAFE_NAME}.${SINGLE_FILE##*.}"
+            echo "SINGLE_FILE=true" >> $GITHUB_ENV
+          else
+            # Multiple files - zip them
+            echo "Multiple photos detected ($FILE_COUNT files) - creating archive"
+            
+            # Create a folder with the output name
+            mkdir -p "${PHOTO_FOLDER}_photos"
+            
+            # Move all image files into that folder
+            mv *.jpg *.jpeg *.png *.gif *.webp *.bmp "${PHOTO_FOLDER}_photos/" 2>/dev/null
+            mv *.jpg *.jpeg *.png *.gif *.webp *.bmp "${PHOTO_FOLDER}_photos/" 2>/dev/null || true
+            
+            echo "Files moved to folder:"
+            ls -la "${PHOTO_FOLDER}_photos/"
+            
+            cd ..
+            
+            # Calculate total size of the folder
+            TOTAL_SIZE=$(du -sb "${PHOTO_FOLDER}_photos" | cut -f1)
+            TOTAL_SIZE_MB=$((TOTAL_SIZE / 1024 / 1024))
+            echo "Total combined size: ${TOTAL_SIZE_MB} MB"
+            echo "Split size limit: ${{ inputs.parts_size }} MB"
+            
+            cd tmp_photos
+            
+            if [ $TOTAL_SIZE_MB -le ${{ inputs.parts_size }} ]; then
+              echo "Creating single ZIP file (within size limit)"
+              zip -0 -r "../${PHOTO_FOLDER}/${SAFE_NAME}.zip" "${PHOTO_FOLDER}_photos"
+              echo "✅ Created: ${SAFE_NAME}.zip"
+              echo "SINGLE_FILE=false" >> $GITHUB_ENV
+            else
+              echo "Creating split ZIP archive (exceeds size limit)"
+              zip -0 -r -s ${{ inputs.parts_size }}m "../${PHOTO_FOLDER}/${SAFE_NAME}.zip" "${PHOTO_FOLDER}_photos"
+              echo "✅ Created split archive parts"
+              echo "SINGLE_FILE=false" >> $GITHUB_ENV
+            fi
+            
+            # Remove the folder after zipping
+            rm -rf "${PHOTO_FOLDER}_photos"
+            echo "Removed temporary folder"
+          fi
+          
+          cd ..
+
+      - name: Determine next README filename
+        id: readme_name
+        run: |
+          # Find the highest existing README number at the BRANCH ROOT
+          HIGHEST=0
+          for file in README*.md; do
+            if [ -f "$file" ]; then
+              if [ "$file" = "README.md" ]; then
+                NUM=1
+              else
+                NUM=$(echo "$file" | grep -o '[0-9]\+' | head -1)
+                if [ -z "$NUM" ]; then
+                  NUM=1
+                fi
+              fi
+              if [ $NUM -gt $HIGHEST ]; then
+                HIGHEST=$NUM
+              fi
+            fi
+          done
+          
+          NEXT_NUM=$((HIGHEST + 1))
+          
+          if [ $NEXT_NUM -eq 1 ]; then
+            README_NAME="README.md"
+          else
+            README_NAME="README${NEXT_NUM}.md"
+          fi
+          
+          echo "README_NAME=$README_NAME" >> $GITHUB_ENV
+          echo "Using README file at branch root: $README_NAME"
+
+      - name: Generate README with Download Links
+        run: |
+          README_NAME="${{ env.README_NAME }}"
+          SAFE_NAME="${{ env.SAFE_NAME }}"
+          DOWNLOAD_MODE="${{ inputs.download_mode }}"
+          GALLERY_URL="${{ inputs.gallery_url }}"
+          
+          echo "# 📸 Photo Download Links" > "$README_NAME"
+          echo "Generated on: $(date)" >> "$README_NAME"
+          echo "" >> "$README_NAME"
+          echo "**Source URL:** $GALLERY_URL" >> "$README_NAME"
+          echo "**Mode:** $DOWNLOAD_MODE" >> "$README_NAME"
+          echo "" >> "$README_NAME"
+          
+          # Use the safe folder name
+          PHOTO_FOLDER="$SAFE_NAME"
+          
+          echo "Photo folder: $PHOTO_FOLDER"
+          
+          # Add links to files in this photo's folder
+          for file in "${PHOTO_FOLDER}"/*; do
+            if [ -f "$file" ]; then
+              filename=$(basename "$file")
+              encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
+              url="https://github.com/${{ github.repository }}/raw/photos/${PHOTO_FOLDER}/$encoded_filename"
+              echo "- [Download $filename]($url)" >> "$README_NAME"
+            fi
+          done
+
+      - name: Save source info to file
+        run: |
+          echo "${{ inputs.gallery_url }}" > source_url.txt
+
+      - name: Upload source URL as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-url
+          path: source_url.txt
+          retention-days: 1
+
+      - name: Save README name to file
+        run: |
+          echo "${{ env.README_NAME }}" > readme_name.txt
+
+      - name: Upload README name as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: readme-name
+          path: readme_name.txt
+          retention-days: 1
+
+      - name: Commit and Push in Batches of 5
+        run: |
+          PHOTO_FOLDER="${{ env.SAFE_NAME }}"
+          README_FILE="${{ env.README_NAME }}"
+          
+          # Check if folder exists and has files
+          if [ ! -d "$PHOTO_FOLDER" ]; then
+            echo "Photo folder not found: $PHOTO_FOLDER"
+            exit 0
+          fi
+          
+          # Store list of files in a temporary file
+          find "$PHOTO_FOLDER" -maxdepth 1 -type f > file_list.txt 2>/dev/null || true
+          
+          # Count total files
+          TOTAL_FILES=$(wc -l < file_list.txt)
+          echo "Total files to commit: $TOTAL_FILES"
+          
+          if [ "$TOTAL_FILES" -eq 0 ]; then
+            echo "No files to commit"
+            rm -f file_list.txt
+            exit 0
+          fi
+          
+          # Set batch size (5 files per commit)
+          BATCH_SIZE=5
+          BATCH_NUM=1
+          
+          # Process files in batches
+          while [ $(wc -l < file_list.txt) -gt 0 ]; do
+            # Take first BATCH_SIZE files
+            BATCH_FILES=$(head -n $BATCH_SIZE file_list.txt)
+            
+            # Remove these files from the list for next iteration
+            tail -n +$((BATCH_SIZE + 1)) file_list.txt > temp_list.txt 2>/dev/null || touch temp_list.txt
+            mv temp_list.txt file_list.txt
+            
+            # Add this batch of files
+            for file in $BATCH_FILES; do
+              if [ -f "$file" ]; then
+                git add "$file"
+              fi
+            done
+            
+            # Also add README.md only on first batch
+            if [ $BATCH_NUM -eq 1 ] && [ -f "$README_FILE" ]; then
+              git add "$README_FILE"
+            fi
+            
+            # Commit this batch
+            FILE_COUNT=$(echo "$BATCH_FILES" | wc -w)
+            git commit -m "[bot] Add photo files batch $BATCH_NUM ($FILE_COUNT files)"
+            
+            # Push after each batch
+            git push
+            
+            echo "✅ Batch $BATCH_NUM committed and pushed"
+            BATCH_NUM=$((BATCH_NUM + 1))
+            
+            # Small delay to avoid overwhelming GitHub
+            sleep 2
+          done
+          
+          echo "✅ All $TOTAL_FILES files committed and pushed in batches"
+          rm -f file_list.txt temp_list.txt
+
+  # ============================================
+  # JOB 2: Send files to Bale bot using README links
+  # ============================================
+  send-to-bot:
+    runs-on: ubuntu-latest
+    needs: download-and-release
+    if: always() && needs.download-and-release.result == 'success'
+    
+    steps:
+      - name: Mask sensitive inputs
+        run: |
+          echo "::add-mask::${{ inputs.bale_token }}"
+          echo "::add-mask::${{ inputs.bale_chat_id }}"
+
+      - name: Download README name artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: readme-name
+          path: .
+
+      - name: Download source URL artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: source-url
+          path: .
+
+      - name: Get README name
+        id: get_readme_name
+        run: |
+          if [ -f "readme_name.txt" ]; then
+            README_NAME=$(cat readme_name.txt)
+            echo "README_NAME=$README_NAME" >> $GITHUB_ENV
+            echo "Using README: $README_NAME"
+          else
+            echo "README_NAME=README.md" >> $GITHUB_ENV
+          fi
+
+      - name: Fetch README from branch root
+        id: extract
+        run: |
+          README_FILE="${{ env.README_NAME }}"
+          BRANCH_NAME="photos"
+          REPO="${{ github.repository }}"
+          
+          README_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH_NAME}/${README_FILE}"
+          echo "Fetching README from: $README_URL"
+          
+          curl -L -o "$README_FILE" "$README_URL"
+          
+          if [ ! -f "$README_FILE" ]; then
+            echo "❌ Could not fetch $README_FILE from branch root: $BRANCH_NAME"
+            exit 1
+          fi
+          
+          echo "README file contents:"
+          echo "=========================================="
+          cat "$README_FILE"
+          echo "=========================================="
+          
+          # Extract all download links from README
+          grep -oE 'https://[^ )]+\.(z[0-9]+|zip|jpg|png|gif|webp|jpeg)' "$README_FILE" > extracted_links.txt 2>/dev/null || true
+          
+          sort -u extracted_links.txt -o extracted_links.txt
+          sed -i '/^$/d' extracted_links.txt
+          
+          LINK_COUNT=$(wc -l < extracted_links.txt)
+          echo "LINK_COUNT=$LINK_COUNT" >> $GITHUB_ENV
+          
+          echo ""
+          echo "Found $LINK_COUNT links in $README_FILE:"
+          echo "=========================================="
+          cat extracted_links.txt
+          echo "=========================================="
+          
+          if [ "$LINK_COUNT" -eq 0 ]; then
+            echo "❌ No download links found in README"
+            exit 1
+          fi
+
+      - name: Download files using wget
+        run: |
+          mkdir -p downloaded_files
+          cd downloaded_files
+          
+          LINK_NUM=1
+          while IFS= read -r LINK; do
+            if [ -n "$LINK" ]; then
+              echo "=========================================="
+              echo "Downloading file $LINK_NUM of ${{ env.LINK_COUNT }} from:"
+              echo "$LINK"
+              echo "=========================================="
+              
+              wget --content-disposition --trust-server-names --max-redirect=5 "$LINK"
+              
+              DOWNLOADED_FILE=$(ls -1 | head -n 1)
+              echo "Downloaded file: $DOWNLOADED_FILE"
+              
+              if [ -f "$DOWNLOADED_FILE" ] && [ -s "$DOWNLOADED_FILE" ]; then
+                SIZE=$(stat -c%s "$DOWNLOADED_FILE")
+                SIZE_MB=$((SIZE / 1024 / 1024))
+                echo "✅ Downloaded: $DOWNLOADED_FILE (${SIZE_MB}MB)"
+                echo "$DOWNLOADED_FILE:SUCCESS:$SIZE" >> ../download_status.txt
+              else
+                echo "❌ Failed to download from: $LINK"
+                echo "unknown:FAILED:0" >> ../download_status.txt
+              fi
+              
+              LINK_NUM=$((LINK_NUM + 1))
+              echo ""
+            fi
+          done < ../extracted_links.txt
+          
+          cd ..
+          
+          echo "Files in downloaded_files directory:"
+          ls -lh downloaded_files/
+
+      - name: Send files to Bale bot
+        run: |
+          TOKEN="${{ inputs.bale_token }}"
+          CHAT_ID="${{ inputs.bale_chat_id }}"
+          LINK_COUNT="${{ env.LINK_COUNT }}"
+          SOURCE_URL=$(cat source_url.txt 2>/dev/null || echo "Unknown source")
+          DOWNLOAD_MODE="${{ inputs.download_mode }}"
+          
+          # Build caption
+          CAPTION="📸 *Photo Download Complete!*%0A%0A🔗 Source: ${SOURCE_URL}%0A📦 Mode: ${DOWNLOAD_MODE}%0A📁 Found ${LINK_COUNT} file part(s)%0A⬇️ Downloading and sending..."
+          
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=${CAPTION}" \
+            -d "parse_mode=Markdown"
+          
+          cd downloaded_files
+          
+          FILE_NUM=1
+          for FILE in *; do
+            if [ -f "$FILE" ] && [ -s "$FILE" ]; then
+              SIZE=$(stat -c%s "$FILE")
+              SIZE_MB=$((SIZE / 1024 / 1024))
+              
+              echo "Sending file $FILE_NUM: $FILE (${SIZE_MB}MB)"
+              
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+                -F "chat_id=${CHAT_ID}" \
+                -F "document=@${FILE}" \
+                -F "caption=${FILE} | ${SIZE_MB}MB"
+              
+              echo "✅ Sent $FILE"
+              
+              FILE_NUM=$((FILE_NUM + 1))
+              sleep 1
+            fi
+          done
+          
+          cd ..
+          
+          SENT_COUNT=$((FILE_NUM - 1))
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=✅ Done! Sent ${SENT_COUNT} file(s) from ${LINK_COUNT} link(s)."
+
+      - name: Show summary
+        run: |
+          echo "## 📸 Photo Downloader Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Source URL | ${{ inputs.gallery_url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Mode | ${{ inputs.download_mode }} |" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ inputs.range_start }}" ] && [ -n "${{ inputs.range_end }}" ]; then
+            echo "| Range | ${{ inputs.range_start }}-${{ inputs.range_end }} |" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "| Links found | ${{ env.LINK_COUNT }} |" >> $GITHUB_STEP_SUMMARY
+          if [ -f "download_status.txt" ]; then
+            SUCCESS_COUNT=$(grep -c ":SUCCESS:" download_status.txt || echo "0")
+            FAILED_COUNT=$(grep -c ":FAILED:" download_status.txt || echo "0")
+            echo "| Successfully downloaded | $SUCCESS_COUNT |" >> $GITHUB_STEP_SUMMARY
+            echo "| Failed downloads | $FAILED_COUNT |" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Extracted links from README.md:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat extracted_links.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup
+        run: |
+          rm -f README*.md source_url.txt download_status.txt extracted_links.txt readme_name.txt
+          rm -rf downloaded_files tmp_photos
+          echo "🧹 Cleaned up temporary files"
