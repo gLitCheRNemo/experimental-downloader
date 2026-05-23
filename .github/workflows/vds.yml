@@ -516,7 +516,8 @@ jobs:
           ls -lh downloaded_files/
 
       # ============================================
-      # FIXED: Send thumbnail with caption (no line break syntax error)
+      # MODIFIED: Send thumbnail with caption and send files to Bale
+      # File caption format: "FILE_NAME | SIZE MB .EXTENSION"
       # ============================================
       - name: Send thumbnail with caption and send files to Bale
         run: |
@@ -542,7 +543,7 @@ jobs:
               -d "parse_mode=Markdown"
           fi
           
-          # Send all downloaded files
+          # Send all downloaded files with NEW caption format
           cd downloaded_files
           
           FILE_NUM=1
@@ -551,12 +552,22 @@ jobs:
               SIZE=$(stat -c%s "$FILE")
               SIZE_MB=$((SIZE / 1024 / 1024))
               
-              echo "Sending file $FILE_NUM: $FILE (${SIZE_MB}MB)"
+              # Extract file extension (including the dot, e.g., .z01, .z02, .zip)
+              EXTENSION="${FILE##*.}"
+              # Add the dot back if it's a valid extension (z01, z02, zip, etc.)
+              if [ -n "$EXTENSION" ]; then
+                EXTENSION=".${EXTENSION}"
+              else
+                EXTENSION=""
+              fi
               
+              echo "Sending file $FILE_NUM: $FILE (${SIZE_MB}MB)${EXTENSION}"
+              
+              # New caption format: FILENAME | SIZE MB .EXTENSION
               curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
                 -F "chat_id=${CHAT_ID}" \
                 -F "document=@${FILE}" \
-                -F "caption=${FILE} | ${SIZE_MB}MB"
+                -F "caption=${FILE} | ${SIZE_MB}MB ${EXTENSION}"
               
               echo "✅ Sent $FILE"
               
