@@ -49,6 +49,12 @@ jobs:
       contents: write
 
     steps:
+      - name: Mask sensitive inputs
+        run: |
+          echo "::add-mask::${{ inputs.bale_token }}"
+          echo "::add-mask::${{ inputs.bale_chat_id }}"
+          echo "✅ Sensitive inputs masked"
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -139,6 +145,8 @@ jobs:
             echo "IS_PLAYLIST=false" >> $GITHUB_ENV
             echo "Single video URL detected"
           fi
+          # Save mode to file for Job 2
+          echo "$IS_PLAYLIST" > mode.txt
 
       - name: Download playlist videos
         id: download_playlist
@@ -475,6 +483,17 @@ jobs:
           echo "README.md" > readme_name.txt
           echo "${{ env.SAFE_NAME }}/thumbnail.jpg" > thumbnail_path.txt
 
+      - name: Save mode artifact for Job 2
+        run: |
+          echo "${{ env.IS_PLAYLIST }}" > mode.txt
+
+      - name: Upload mode artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mode-info
+          path: mode.txt
+          retention-days: 1
+
       - name: Upload single video artifacts
         if: env.IS_PLAYLIST == 'false'
         uses: actions/upload-artifact@v4
@@ -508,15 +527,33 @@ jobs:
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
 
-      - name: Check if playlist or single
+      - name: Download mode artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mode-info
+          path: .
+
+      - name: Check if playlist or single from artifact
         id: check_mode
         run: |
-          if [ -f "video_info.txt" ]; then
-            echo "MODE=playlist" >> $GITHUB_ENV
-            echo "Playlist mode detected"
+          if [ -f "mode.txt" ]; then
+            MODE=$(cat mode.txt)
+            if [ "$MODE" = "true" ]; then
+              echo "MODE=playlist" >> $GITHUB_ENV
+              echo "Playlist mode detected from artifact"
+            else
+              echo "MODE=single" >> $GITHUB_ENV
+              echo "Single video mode detected from artifact"
+            fi
           else
-            echo "MODE=single" >> $GITHUB_ENV
-            echo "Single video mode detected"
+            # Fallback: check for video_info.txt
+            if [ -f "video_info.txt" ]; then
+              echo "MODE=playlist" >> $GITHUB_ENV
+              echo "Playlist mode detected (fallback)"
+            else
+              echo "MODE=single" >> $GITHUB_ENV
+              echo "Single video mode detected (fallback)"
+            fi
           fi
 
       - name: Download single video artifacts
@@ -713,6 +750,6 @@ jobs:
 
       - name: Cleanup
         run: |
-          rm -f README*.md video_title.txt download_status.txt extracted_links.txt readme_name.txt thumbnail.jpg video_info.txt
+          rm -f README*.md video_title.txt download_status.txt extracted_links.txt readme_name.txt thumbnail.jpg video_info.txt mode.txt
           rm -rf downloaded_files tmpvideos
           echo "Cleaned up temporary files"
