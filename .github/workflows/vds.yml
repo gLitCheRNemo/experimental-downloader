@@ -344,10 +344,8 @@ jobs:
 
             echo "Processing folder: $VIDEO_FOLDER"
 
-            cd "$VIDEO_FOLDER"
-
             FILES=()
-            for f in *.z[0-9]* *.zip; do
+            for f in "$VIDEO_FOLDER"/*.z[0-9]* "$VIDEO_FOLDER"/*.zip; do
               if [ -f "$f" ]; then
                 FILES+=("$f")
               fi
@@ -355,7 +353,6 @@ jobs:
 
             if [ ${#FILES[@]} -eq 0 ]; then
               echo "No files found in $VIDEO_FOLDER"
-              cd ..
               continue
             fi
 
@@ -371,8 +368,7 @@ jobs:
 
               if [ ${#BATCH_FILES[@]} -ge $BATCH_SIZE ]; then
                 echo "Committing batch $BATCH_NUM for $VIDEO_FOLDER"
-                cd ../..
-                git add "${VIDEO_FOLDER}/${BATCH_FILES[@]}"
+                git add "${BATCH_FILES[@]}"
                 git commit -m "[bot] Add ${VIDEO_FOLDER} batch $BATCH_NUM (${#BATCH_FILES[@]} files)"
                 git push
                 echo "Batch $BATCH_NUM committed and pushed"
@@ -380,22 +376,17 @@ jobs:
                 BATCH_FILES=()
                 BATCH_NUM=$((BATCH_NUM + 1))
                 sleep 2
-                cd "$VIDEO_FOLDER"
               fi
             done
 
             if [ ${#BATCH_FILES[@]} -gt 0 ]; then
               echo "Committing final batch for $VIDEO_FOLDER"
-              cd ../..
-              git add "${VIDEO_FOLDER}/${BATCH_FILES[@]}"
+              git add "${BATCH_FILES[@]}"
               git commit -m "[bot] Add ${VIDEO_FOLDER} final batch (${#BATCH_FILES[@]} files)"
               git push
               echo "Final batch committed and pushed"
               sleep 2
-              cd "$VIDEO_FOLDER"
             fi
-
-            cd ..
           done
 
       - name: Batch commit README files
