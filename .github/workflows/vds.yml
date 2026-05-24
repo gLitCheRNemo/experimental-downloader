@@ -41,7 +41,7 @@ on:
 
 jobs:
   # ============================================
-  # JOB 1: Download YouTube videos/playlist and create READMEs
+  # JOB 1: Download YouTube videos/playlists and create READMEs
   # ============================================
   download-and-release:
     runs-on: ubuntu-latest
@@ -135,261 +135,595 @@ jobs:
           deno --version
 
       # ============================================
-      # MAIN LOOP: Process all URLs
+      # Parse URLs into separate variables
       # ============================================
-      - name: Download and process all URLs
-        id: process_all
+      - name: Parse URLs
+        id: parse_urls
         run: |
-          # Parse URLs (remove spaces, split by comma)
-          INPUT_URLS="${{ inputs.youtube_urls }}"
           # Remove all spaces and split by comma
-          CLEAN_URLS=$(echo "$INPUT_URLS" | tr -d ' ')
-          IFS=',' read -ra URL_ARRAY <<< "$CLEAN_URLS"
-          TOTAL_URLS=${#URL_ARRAY[@]}
+          INPUT="${{ inputs.youtube_urls }}"
+          CLEANED=$(echo "$INPUT" | tr -d ' ')
+          echo "$CLEANED" | tr ',' '\n' > urls_list.txt
           
-          echo "=========================================="
-          echo "Found $TOTAL_URLS URL(s) to process"
-          echo "=========================================="
+          # Remove empty lines
+          sed -i '/^$/d' urls_list.txt
           
-          # Global counter for README numbering
-          GLOBAL_README_COUNTER=1
+          URL_COUNT=$(wc -l < urls_list.txt)
+          echo "URL_COUNT=$URL_COUNT" >> $GITHUB_ENV
+          echo "Found $URL_COUNT URL(s) to process"
           
-          # Master video info file
-          > video_info.txt
-          
-          for URL_INDEX in "${!URL_ARRAY[@]}"; do
-            CURRENT_URL="${URL_ARRAY[$URL_INDEX]}"
-            CURRENT_NUM=$((URL_INDEX + 1))
-            
-            echo "=========================================="
-            echo "Processing URL $CURRENT_NUM of $TOTAL_URLS: $CURRENT_URL"
-            echo "=========================================="
-            
-            # ============================================
-            # Check if URL is a playlist
-            # ============================================
-            if [[ "$CURRENT_URL" == *"list="* ]] || [[ "$CURRENT_URL" == *"&list="* ]]; then
-              IS_PLAYLIST="true"
-              echo "Detected as playlist URL"
-              
-              if [ -n "${{ inputs.playlist_items }}" ]; then
-                ITEMS_OPTION="--playlist-items ${{ inputs.playlist_items }}"
-                echo "Using playlist items: ${{ inputs.playlist_items }}"
-              else
-                ITEMS_OPTION=""
-              fi
-              
-              yt-dlp --flat-playlist --print "%(id)s|%(title)s" $ITEMS_OPTION "$CURRENT_URL" > video_data.txt
-              VIDEO_COUNT=$(wc -l < video_data.txt)
-              echo "Found $VIDEO_COUNT videos in playlist"
+          # Save each URL
+          for i in $(seq 1 5); do
+            URL=$(sed -n "${i}p" urls_list.txt)
+            if [ -n "$URL" ]; then
+              echo "URL_$i=$URL" >> $GITHUB_ENV
+              echo "URL_${i}_EXISTS=true" >> $GITHUB_ENV
             else
-              IS_PLAYLIST="false"
-              echo "Single video URL detected"
-              VIDEO_ID=$(yt-dlp --get-id "$CURRENT_URL")
-              VIDEO_TITLE=$(yt-dlp --get-title "$CURRENT_URL")
-              echo "${VIDEO_ID}|${VIDEO_TITLE}" > video_data.txt
-              VIDEO_COUNT=1
+              echo "URL_${i}_EXISTS=false" >> $GITHUB_ENV
+            fi
+          done
+
+      # ============================================
+      # DOWNLOAD STEP 1 (URL 1)
+      # ============================================
+      - name: Download and process URL 1
+        if: env.URL_1_EXISTS == 'true'
+        run: |
+          URL="${{ env.URL_1 }}"
+          echo "Processing URL 1: $URL"
+          
+          # Check if URL is a playlist
+          if [[ "$URL" == *"list="* ]] || [[ "$URL" == *"&list="* ]]; then
+            echo "IS_PLAYLIST=true" >> $GITHUB_ENV
+            echo "Detected as playlist URL"
+            
+            if [ -n "${{ inputs.playlist_items }}" ]; then
+              ITEMS_OPTION="--playlist-items ${{ inputs.playlist_items }}"
+              echo "Using playlist items: ${{ inputs.playlist_items }}"
+            else
+              ITEMS_OPTION=""
             fi
             
-            # ============================================
-            # Download videos
-            # ============================================
-            QUALITY="${{ inputs.quality }}"
-            
-            if [ "$QUALITY" = "audio" ]; then
-              FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
-            elif [ "$QUALITY" = "best" ]; then
-              FORMAT_OPTS="-f bestvideo+bestaudio/best --merge-output-format mp4"
-            else
-              FORMAT_OPTS="-f bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}] --merge-output-format mp4"
-            fi
-            
-            mkdir -p tmpvideos
-            cd tmpvideos
-            
-            if [ "$IS_PLAYLIST" = "true" ]; then
-              if [ -n "${{ inputs.playlist_items }}" ]; then
-                yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" \
-                  $FORMAT_OPTS \
-                  --playlist-items "${{ inputs.playlist_items }}" \
-                  --output "%(title)s.%(ext)s" \
-                  "$CURRENT_URL"
-              else
-                yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" \
-                  $FORMAT_OPTS \
-                  --output "%(title)s.%(ext)s" \
-                  "$CURRENT_URL"
-              fi
+            yt-dlp --flat-playlist --print "%(id)s|%(title)s" $ITEMS_OPTION "$URL" > video_data.txt
+            VIDEO_COUNT=$(wc -l < video_data.txt)
+            echo "VIDEO_COUNT=$VIDEO_COUNT" >> $GITHUB_ENV
+            echo "Found $VIDEO_COUNT videos in playlist"
+          else
+            echo "IS_PLAYLIST=false" >> $GITHUB_ENV
+            echo "Single video URL detected"
+            VIDEO_ID=$(yt-dlp --get-id "$URL")
+            VIDEO_TITLE=$(yt-dlp --get-title "$URL")
+            echo "${VIDEO_ID}|${VIDEO_TITLE}" > video_data.txt
+            VIDEO_COUNT=1
+          fi
+          
+          # Download videos
+          QUALITY="${{ inputs.quality }}"
+          
+          if [ "$QUALITY" = "audio" ]; then
+            FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
+          elif [ "$QUALITY" = "best" ]; then
+            FORMAT_OPTS="-f bestvideo+bestaudio/best --merge-output-format mp4"
+          else
+            FORMAT_OPTS="-f bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}] --merge-output-format mp4"
+          fi
+          
+          mkdir -p tmpvideos
+          cd tmpvideos
+          
+          if [ "$IS_PLAYLIST" = "true" ]; then
+            if [ -n "${{ inputs.playlist_items }}" ]; then
+              yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" \
+                $FORMAT_OPTS \
+                --playlist-items "${{ inputs.playlist_items }}" \
+                --output "%(title)s.%(ext)s" \
+                "$URL"
             else
               yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" \
                 $FORMAT_OPTS \
                 --output "%(title)s.%(ext)s" \
-                "$CURRENT_URL"
+                "$URL"
             fi
+          else
+            yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" \
+              $FORMAT_OPTS \
+              --output "%(title)s.%(ext)s" \
+              "$URL"
+          fi
+          
+          cd ..
+          
+          # Process videos
+          mkdir -p thumbnails_temp
+          
+          while IFS='|' read -r VIDEO_ID VIDEO_TITLE; do
+            if [ -z "$VIDEO_ID" ]; then
+              continue
+            fi
+            
+            echo "Processing video: $VIDEO_TITLE"
+            
+            SAFE_NAME=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_' | sed 's/^_//;s/_$//')
+            VIDEO_FOLDER="$SAFE_NAME"
+            
+            mkdir -p "../$VIDEO_FOLDER"
+            
+            cd tmpvideos
+            VIDEO_FILE=$(ls -1 | head -n 1)
+            
+            echo "Splitting video into ${SAFE_NAME}.zip parts..."
+            zip -0 -s "${{ inputs.parts_size }}m" "../${VIDEO_FOLDER}/${SAFE_NAME}.zip" "$VIDEO_FILE"
             
             cd ..
             
-            # ============================================
-            # Process each video
-            # ============================================
-            mkdir -p thumbnails_temp
+            # Download thumbnail
+            mkdir -p "thumbnails_temp/$SAFE_NAME"
             
-            VIDEO_INDEX=1
-            CURRENT_README_NUM=$GLOBAL_README_COUNTER
+            THUMBNAIL_DOWNLOADED=false
+            if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/maxresdefault.jpg" -O "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" 2>/dev/null; then
+              if [ -f "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" ] && [ $(stat -c%s "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg") -gt 10000 ]; then
+                THUMBNAIL_DOWNLOADED=true
+              else
+                rm -f "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg"
+              fi
+            fi
             
-            while IFS='|' read -r VIDEO_ID VIDEO_TITLE; do
-              if [ -z "$VIDEO_ID" ]; then
-                continue
-              fi
-              
-              echo "Processing video $VIDEO_INDEX: $VIDEO_TITLE"
-              
-              SAFE_NAME=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_' | sed 's/^_//;s/_$//')
-              if [ -z "$SAFE_NAME" ]; then
-                SAFE_NAME="video_$VIDEO_INDEX"
-              fi
-              
-              # Download thumbnail
-              mkdir -p "thumbnails_temp/${CURRENT_README_NUM}_${SAFE_NAME}"
-              
-              THUMBNAIL_DOWNLOADED=false
-              if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/maxresdefault.jpg" -O "thumbnails_temp/${CURRENT_README_NUM}_${SAFE_NAME}/thumbnail.jpg" 2>/dev/null; then
-                if [ -f "thumbnails_temp/${CURRENT_README_NUM}_${SAFE_NAME}/thumbnail.jpg" ] && [ $(stat -c%s "thumbnails_temp/${CURRENT_README_NUM}_${SAFE_NAME}/thumbnail.jpg") -gt 10000 ]; then
+            if [ "$THUMBNAIL_DOWNLOADED" = false ]; then
+              if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/sddefault.jpg" -O "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" 2>/dev/null; then
+                if [ -f "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" ] && [ $(stat -c%s "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg") -gt 5000 ]; then
                   THUMBNAIL_DOWNLOADED=true
                 else
-                  rm -f "thumbnails_temp/${CURRENT_README_NUM}_${SAFE_NAME}/thumbnail.jpg"
+                  rm -f "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg"
                 fi
               fi
-              
-              if [ "$THUMBNAIL_DOWNLOADED" = false ]; then
-                if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/sddefault.jpg" -O "thumbnails_temp/${CURRENT_README_NUM}_${SAFE_NAME}/thumbnail.jpg" 2>/dev/null; then
-                  if [ -f "thumbnails_temp/${CURRENT_README_NUM}_${SAFE_NAME}/thumbnail.jpg" ] && [ $(stat -c%s "thumbnails_temp/${CURRENT_README_NUM}_${SAFE_NAME}/thumbnail.jpg") -gt 5000 ]; then
-                    THUMBNAIL_DOWNLOADED=true
-                  else
-                    rm -f "thumbnails_temp/${CURRENT_README_NUM}_${SAFE_NAME}/thumbnail.jpg"
-                  fi
+            fi
+            
+            if [ "$THUMBNAIL_DOWNLOADED" = false ]; then
+              if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/hqdefault.jpg" -O "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" 2>/dev/null; then
+                if [ -f "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" ] && [ $(stat -c%s "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg") -gt 2000 ]; then
+                  THUMBNAIL_DOWNLOADED=true
+                else
+                  rm -f "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg"
                 fi
               fi
-              
-              if [ "$THUMBNAIL_DOWNLOADED" = false ]; then
-                if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/hqdefault.jpg" -O "thumbnails_temp/${CURRENT_README_NUM}_${SAFE_NAME}/thumbnail.jpg" 2>/dev/null; then
-                  if [ -f "thumbnails_temp/${CURRENT_README_NUM}_${SAFE_NAME}/thumbnail.jpg" ] && [ $(stat -c%s "thumbnails_temp/${CURRENT_README_NUM}_${SAFE_NAME}/thumbnail.jpg") -gt 2000 ]; then
-                    THUMBNAIL_DOWNLOADED=true
-                  else
-                    rm -f "thumbnails_temp/${CURRENT_README_NUM}_${SAFE_NAME}/thumbnail.jpg"
-                  fi
-                fi
-              fi
-              
-              if [ "$THUMBNAIL_DOWNLOADED" = false ]; then
-                touch "thumbnails_temp/${CURRENT_README_NUM}_${SAFE_NAME}/thumbnail.jpg"
-              fi
-              
-              # Find video file
-              cd tmpvideos
-              VIDEO_FILE=""
-              for f in *.mp4 *.mkv *.webm *.mp3 *.m4a; do
-                if [ -f "$f" ]; then
-                  VIDEO_FILE="$f"
-                  break
-                fi
-              done
-              
-              if [ -z "$VIDEO_FILE" ]; then
-                echo "Could not find video file for $VIDEO_TITLE"
-                VIDEO_INDEX=$((VIDEO_INDEX + 1))
-                CURRENT_README_NUM=$((CURRENT_README_NUM + 1))
-                GLOBAL_README_COUNTER=$((GLOBAL_README_COUNTER + 1))
-                continue
-              fi
-              
-              # Create folder and split
-              VIDEO_FOLDER="${CURRENT_README_NUM}_${SAFE_NAME}"
-              mkdir -p "../../$VIDEO_FOLDER"
-              
-              echo "Splitting video into ${SAFE_NAME}.zip parts..."
-              zip -0 -s "${{ inputs.parts_size }}m" "../../${VIDEO_FOLDER}/${SAFE_NAME}.zip" "$VIDEO_FILE"
-              
-              # Move thumbnail
-              if [ -f "../thumbnails_temp/${VIDEO_FOLDER}/thumbnail.jpg" ]; then
-                mv "../thumbnails_temp/${VIDEO_FOLDER}/thumbnail.jpg" "../../${VIDEO_FOLDER}/thumbnail.jpg"
-              fi
-              
-              # Generate README
-              if [ $CURRENT_README_NUM -eq 1 ]; then
-                README_NAME="README.md"
-              else
-                README_NAME="README${CURRENT_README_NUM}.md"
-              fi
-              
-              cd ../..
-              
-              {
-                echo "# 📥 Download Links - ${VIDEO_TITLE}"
-                echo ""
-                echo "Generated on: $(date)"
-                echo ""
-                echo "## Download Links"
-                echo ""
-              } > "$README_NAME"
-              
-              # Add thumbnail link
-              if [ -f "${VIDEO_FOLDER}/thumbnail.jpg" ]; then
-                encoded_thumb=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "thumbnail.jpg")
-                thumb_url="https://github.com/${{ github.repository }}/raw/videos/${VIDEO_FOLDER}/$encoded_thumb"
-                echo "- [Download Thumbnail]($thumb_url)" >> "$README_NAME"
-              fi
-              
-              # Add zip links with natural sorting
-              ZIP_FILES=()
-              for file in "${VIDEO_FOLDER}"/*.z[0-9]* "${VIDEO_FOLDER}"/*.zip; do
-                if [ -f "$file" ]; then
-                  ZIP_FILES+=("$(basename "$file")")
-                fi
-              done
-              
-              if [ ${#ZIP_FILES[@]} -gt 0 ]; then
-                IFS=$'\n' ZIP_FILES=($(printf '%s\n' "${ZIP_FILES[@]}" | sort -V))
-                unset IFS
-              fi
-              
-              for filename in "${ZIP_FILES[@]}"; do
+            fi
+            
+            if [ "$THUMBNAIL_DOWNLOADED" = false ]; then
+              touch "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg"
+            fi
+            
+            # Move thumbnail
+            if [ -f "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" ]; then
+              mv "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" "${VIDEO_FOLDER}/thumbnail.jpg"
+            fi
+            
+            # Generate README
+            HIGHEST=$(ls README*.md 2>/dev/null | wc -l)
+            NEXT_NUM=$((HIGHEST + 1))
+            
+            if [ $NEXT_NUM -eq 1 ]; then
+              README_NAME="README.md"
+            else
+              README_NAME="README${NEXT_NUM}.md"
+            fi
+            
+            echo "# 📥 Download Links - ${VIDEO_TITLE}" > "$README_NAME"
+            echo "Generated on: $(date)" >> "$README_NAME"
+            echo "" >> "$README_NAME"
+            
+            # Add thumbnail link
+            if [ -f "${VIDEO_FOLDER}/thumbnail.jpg" ]; then
+              encoded_thumb=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "thumbnail.jpg")
+              thumb_url="https://github.com/${{ github.repository }}/raw/videos/${VIDEO_FOLDER}/$encoded_thumb"
+              echo "- [Download Thumbnail]($thumb_url)" >> "$README_NAME"
+            fi
+            
+            # Add zip links
+            for file in "${VIDEO_FOLDER}"/*.z[0-9]* "${VIDEO_FOLDER}"/*.zip; do
+              if [ -f "$file" ]; then
+                filename=$(basename "$file")
                 encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
                 url="https://github.com/${{ github.repository }}/raw/videos/${VIDEO_FOLDER}/$encoded_filename"
                 echo "- [Download $filename]($url)" >> "$README_NAME"
-              done
-              
-              # Save to master video info
-              echo "${VIDEO_TITLE}|${README_NAME}|${VIDEO_FOLDER}" >> video_info.txt
-              
-              cd tmpvideos
-              
-              VIDEO_INDEX=$((VIDEO_INDEX + 1))
-              CURRENT_README_NUM=$((CURRENT_README_NUM + 1))
-              GLOBAL_README_COUNTER=$((GLOBAL_README_COUNTER + 1))
-            done < video_data.txt
+              fi
+            done
             
-            cd ..
+            # Save video info
+            echo "${VIDEO_TITLE}|${README_NAME}|${VIDEO_FOLDER}" >> video_info.txt
             
-            # Clean up temp files for this URL
-            rm -rf tmpvideos thumbnails_temp
-            
-            # Commit after each URL to save progress
-            git add .
-            git commit -m "[bot] Processed URL $CURRENT_NUM: $CURRENT_URL" || true
+            # Commit files
+            git add "$VIDEO_FOLDER" "$README_NAME"
+            git commit -m "[bot] Add video: $VIDEO_TITLE" || true
             git push || true
             
-            echo "✅ Finished processing URL $CURRENT_NUM of $TOTAL_URLS"
-            echo "=========================================="
-          done
+            rm -f tmpvideos/*
+          done < video_data.txt
           
-          echo "=========================================="
-          echo "All URLs processed successfully"
-          echo "Total README files created: $((GLOBAL_README_COUNTER - 1))"
-          echo "=========================================="
+          rm -rf tmpvideos thumbnails_temp
+          echo "✅ Finished URL 1"
+
+      # ============================================
+      # DOWNLOAD STEP 2 (URL 2)
+      # ============================================
+      - name: Download and process URL 2
+        if: env.URL_2_EXISTS == 'true'
+        run: |
+          URL="${{ env.URL_2 }}"
+          echo "Processing URL 2: $URL"
           
-          TOTAL_VIDEOS=$((GLOBAL_README_COUNTER - 1))
-          echo "TOTAL_VIDEOS=$TOTAL_VIDEOS" >> $GITHUB_ENV
+          if [[ "$URL" == *"list="* ]] || [[ "$URL" == *"&list="* ]]; then
+            echo "IS_PLAYLIST=true" >> $GITHUB_ENV
+            if [ -n "${{ inputs.playlist_items }}" ]; then
+              ITEMS_OPTION="--playlist-items ${{ inputs.playlist_items }}"
+            else
+              ITEMS_OPTION=""
+            fi
+            yt-dlp --flat-playlist --print "%(id)s|%(title)s" $ITEMS_OPTION "$URL" > video_data.txt
+          else
+            echo "IS_PLAYLIST=false" >> $GITHUB_ENV
+            VIDEO_ID=$(yt-dlp --get-id "$URL")
+            VIDEO_TITLE=$(yt-dlp --get-title "$URL")
+            echo "${VIDEO_ID}|${VIDEO_TITLE}" > video_data.txt
+          fi
+          
+          QUALITY="${{ inputs.quality }}"
+          if [ "$QUALITY" = "audio" ]; then
+            FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
+          elif [ "$QUALITY" = "best" ]; then
+            FORMAT_OPTS="-f bestvideo+bestaudio/best --merge-output-format mp4"
+          else
+            FORMAT_OPTS="-f bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}] --merge-output-format mp4"
+          fi
+          
+          mkdir -p tmpvideos
+          cd tmpvideos
+          
+          if [ "$IS_PLAYLIST" = "true" ]; then
+            if [ -n "${{ inputs.playlist_items }}" ]; then
+              yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" \
+                $FORMAT_OPTS \
+                --playlist-items "${{ inputs.playlist_items }}" \
+                --output "%(title)s.%(ext)s" \
+                "$URL"
+            else
+              yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" \
+                $FORMAT_OPTS \
+                --output "%(title)s.%(ext)s" \
+                "$URL"
+            fi
+          else
+            yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" \
+              $FORMAT_OPTS \
+              --output "%(title)s.%(ext)s" \
+              "$URL"
+          fi
+          
+          cd ..
+          
+          mkdir -p thumbnails_temp
+          
+          while IFS='|' read -r VIDEO_ID VIDEO_TITLE; do
+            if [ -z "$VIDEO_ID" ]; then continue; fi
+            
+            echo "Processing video: $VIDEO_TITLE"
+            
+            SAFE_NAME=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_' | sed 's/^_//;s/_$//')
+            VIDEO_FOLDER="$SAFE_NAME"
+            mkdir -p "../$VIDEO_FOLDER"
+            
+            cd tmpvideos
+            VIDEO_FILE=$(ls -1 | head -n 1)
+            zip -0 -s "${{ inputs.parts_size }}m" "../${VIDEO_FOLDER}/${SAFE_NAME}.zip" "$VIDEO_FILE"
+            cd ..
+            
+            mkdir -p "thumbnails_temp/$SAFE_NAME"
+            wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/maxresdefault.jpg" -O "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" 2>/dev/null || \
+            wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/sddefault.jpg" -O "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" 2>/dev/null || \
+            wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/hqdefault.jpg" -O "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" 2>/dev/null || true
+            
+            if [ -f "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" ]; then
+              mv "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" "${VIDEO_FOLDER}/thumbnail.jpg"
+            fi
+            
+            HIGHEST=$(ls README*.md 2>/dev/null | wc -l)
+            NEXT_NUM=$((HIGHEST + 1))
+            README_NAME="README.md"
+            [ $NEXT_NUM -ne 1 ] && README_NAME="README${NEXT_NUM}.md"
+            
+            echo "# 📥 Download Links - ${VIDEO_TITLE}" > "$README_NAME"
+            echo "Generated on: $(date)" >> "$README_NAME"
+            echo "" >> "$README_NAME"
+            
+            [ -f "${VIDEO_FOLDER}/thumbnail.jpg" ] && echo "- [Download Thumbnail](https://github.com/${{ github.repository }}/raw/videos/${VIDEO_FOLDER}/thumbnail.jpg)" >> "$README_NAME"
+            
+            for file in "${VIDEO_FOLDER}"/*.z[0-9]* "${VIDEO_FOLDER}"/*.zip; do
+              if [ -f "$file" ]; then
+                filename=$(basename "$file")
+                echo "- [Download $filename](https://github.com/${{ github.repository }}/raw/videos/${VIDEO_FOLDER}/$(python3 -c "import urllib.parse; print(urllib.parse.quote('$filename'))"))" >> "$README_NAME"
+              fi
+            done
+            
+            echo "${VIDEO_TITLE}|${README_NAME}|${VIDEO_FOLDER}" >> video_info.txt
+            
+            git add "$VIDEO_FOLDER" "$README_NAME"
+            git commit -m "[bot] Add video: $VIDEO_TITLE" || true
+            git push || true
+            
+            rm -f tmpvideos/*
+          done < video_data.txt
+          
+          rm -rf tmpvideos thumbnails_temp
+          echo "✅ Finished URL 2"
+
+      # ============================================
+      # DOWNLOAD STEP 3 (URL 3)
+      # ============================================
+      - name: Download and process URL 3
+        if: env.URL_3_EXISTS == 'true'
+        run: |
+          URL="${{ env.URL_3 }}"
+          echo "Processing URL 3: $URL"
+          
+          if [[ "$URL" == *"list="* ]] || [[ "$URL" == *"&list="* ]]; then
+            if [ -n "${{ inputs.playlist_items }}" ]; then
+              ITEMS_OPTION="--playlist-items ${{ inputs.playlist_items }}"
+            else
+              ITEMS_OPTION=""
+            fi
+            yt-dlp --flat-playlist --print "%(id)s|%(title)s" $ITEMS_OPTION "$URL" > video_data.txt
+          else
+            VIDEO_ID=$(yt-dlp --get-id "$URL")
+            VIDEO_TITLE=$(yt-dlp --get-title "$URL")
+            echo "${VIDEO_ID}|${VIDEO_TITLE}" > video_data.txt
+          fi
+          
+          QUALITY="${{ inputs.quality }}"
+          if [ "$QUALITY" = "audio" ]; then
+            FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
+          elif [ "$QUALITY" = "best" ]; then
+            FORMAT_OPTS="-f bestvideo+bestaudio/best --merge-output-format mp4"
+          else
+            FORMAT_OPTS="-f bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}] --merge-output-format mp4"
+          fi
+          
+          mkdir -p tmpvideos
+          cd tmpvideos
+          yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" \
+            $FORMAT_OPTS \
+            --output "%(title)s.%(ext)s" \
+            "$URL"
+          cd ..
+          
+          mkdir -p thumbnails_temp
+          
+          while IFS='|' read -r VIDEO_ID VIDEO_TITLE; do
+            if [ -z "$VIDEO_ID" ]; then continue; fi
+            
+            SAFE_NAME=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_' | sed 's/^_//;s/_$//')
+            VIDEO_FOLDER="$SAFE_NAME"
+            mkdir -p "../$VIDEO_FOLDER"
+            
+            cd tmpvideos
+            VIDEO_FILE=$(ls -1 | head -n 1)
+            zip -0 -s "${{ inputs.parts_size }}m" "../${VIDEO_FOLDER}/${SAFE_NAME}.zip" "$VIDEO_FILE"
+            cd ..
+            
+            mkdir -p "thumbnails_temp/$SAFE_NAME"
+            wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/maxresdefault.jpg" -O "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" 2>/dev/null || \
+            wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/sddefault.jpg" -O "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" 2>/dev/null || \
+            wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/hqdefault.jpg" -O "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" 2>/dev/null || true
+            
+            [ -f "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" ] && mv "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" "${VIDEO_FOLDER}/thumbnail.jpg"
+            
+            HIGHEST=$(ls README*.md 2>/dev/null | wc -l)
+            NEXT_NUM=$((HIGHEST + 1))
+            README_NAME="README.md"
+            [ $NEXT_NUM -ne 1 ] && README_NAME="README${NEXT_NUM}.md"
+            
+            echo "# 📥 Download Links - ${VIDEO_TITLE}" > "$README_NAME"
+            echo "Generated on: $(date)" >> "$README_NAME"
+            echo "" >> "$README_NAME"
+            
+            [ -f "${VIDEO_FOLDER}/thumbnail.jpg" ] && echo "- [Download Thumbnail](https://github.com/${{ github.repository }}/raw/videos/${VIDEO_FOLDER}/thumbnail.jpg)" >> "$README_NAME"
+            
+            for file in "${VIDEO_FOLDER}"/*.z[0-9]* "${VIDEO_FOLDER}"/*.zip; do
+              if [ -f "$file" ]; then
+                filename=$(basename "$file")
+                echo "- [Download $filename](https://github.com/${{ github.repository }}/raw/videos/${VIDEO_FOLDER}/$(python3 -c "import urllib.parse; print(urllib.parse.quote('$filename'))"))" >> "$README_NAME"
+              fi
+            done
+            
+            echo "${VIDEO_TITLE}|${README_NAME}|${VIDEO_FOLDER}" >> video_info.txt
+            
+            git add "$VIDEO_FOLDER" "$README_NAME"
+            git commit -m "[bot] Add video: $VIDEO_TITLE" || true
+            git push || true
+            
+            rm -f tmpvideos/*
+          done < video_data.txt
+          
+          rm -rf tmpvideos thumbnails_temp
+          echo "✅ Finished URL 3"
+
+      # ============================================
+      # DOWNLOAD STEP 4 (URL 4)
+      # ============================================
+      - name: Download and process URL 4
+        if: env.URL_4_EXISTS == 'true'
+        run: |
+          URL="${{ env.URL_4 }}"
+          echo "Processing URL 4: $URL"
+          
+          if [[ "$URL" == *"list="* ]] || [[ "$URL" == *"&list="* ]]; then
+            if [ -n "${{ inputs.playlist_items }}" ]; then
+              ITEMS_OPTION="--playlist-items ${{ inputs.playlist_items }}"
+            else
+              ITEMS_OPTION=""
+            fi
+            yt-dlp --flat-playlist --print "%(id)s|%(title)s" $ITEMS_OPTION "$URL" > video_data.txt
+          else
+            VIDEO_ID=$(yt-dlp --get-id "$URL")
+            VIDEO_TITLE=$(yt-dlp --get-title "$URL")
+            echo "${VIDEO_ID}|${VIDEO_TITLE}" > video_data.txt
+          fi
+          
+          QUALITY="${{ inputs.quality }}"
+          if [ "$QUALITY" = "audio" ]; then
+            FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
+          elif [ "$QUALITY" = "best" ]; then
+            FORMAT_OPTS="-f bestvideo+bestaudio/best --merge-output-format mp4"
+          else
+            FORMAT_OPTS="-f bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}] --merge-output-format mp4"
+          fi
+          
+          mkdir -p tmpvideos
+          cd tmpvideos
+          yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" \
+            $FORMAT_OPTS \
+            --output "%(title)s.%(ext)s" \
+            "$URL"
+          cd ..
+          
+          mkdir -p thumbnails_temp
+          
+          while IFS='|' read -r VIDEO_ID VIDEO_TITLE; do
+            if [ -z "$VIDEO_ID" ]; then continue; fi
+            
+            SAFE_NAME=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_' | sed 's/^_//;s/_$//')
+            VIDEO_FOLDER="$SAFE_NAME"
+            mkdir -p "../$VIDEO_FOLDER"
+            
+            cd tmpvideos
+            VIDEO_FILE=$(ls -1 | head -n 1)
+            zip -0 -s "${{ inputs.parts_size }}m" "../${VIDEO_FOLDER}/${SAFE_NAME}.zip" "$VIDEO_FILE"
+            cd ..
+            
+            mkdir -p "thumbnails_temp/$SAFE_NAME"
+            wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/maxresdefault.jpg" -O "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" 2>/dev/null || \
+            wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/sddefault.jpg" -O "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" 2>/dev/null || \
+            wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/hqdefault.jpg" -O "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" 2>/dev/null || true
+            
+            [ -f "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" ] && mv "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" "${VIDEO_FOLDER}/thumbnail.jpg"
+            
+            HIGHEST=$(ls README*.md 2>/dev/null | wc -l)
+            NEXT_NUM=$((HIGHEST + 1))
+            README_NAME="README.md"
+            [ $NEXT_NUM -ne 1 ] && README_NAME="README${NEXT_NUM}.md"
+            
+            echo "# 📥 Download Links - ${VIDEO_TITLE}" > "$README_NAME"
+            echo "Generated on: $(date)" >> "$README_NAME"
+            echo "" >> "$README_NAME"
+            
+            [ -f "${VIDEO_FOLDER}/thumbnail.jpg" ] && echo "- [Download Thumbnail](https://github.com/${{ github.repository }}/raw/videos/${VIDEO_FOLDER}/thumbnail.jpg)" >> "$README_NAME"
+            
+            for file in "${VIDEO_FOLDER}"/*.z[0-9]* "${VIDEO_FOLDER}"/*.zip; do
+              if [ -f "$file" ]; then
+                filename=$(basename "$file")
+                echo "- [Download $filename](https://github.com/${{ github.repository }}/raw/videos/${VIDEO_FOLDER}/$(python3 -c "import urllib.parse; print(urllib.parse.quote('$filename'))"))" >> "$README_NAME"
+              fi
+            done
+            
+            echo "${VIDEO_TITLE}|${README_NAME}|${VIDEO_FOLDER}" >> video_info.txt
+            
+            git add "$VIDEO_FOLDER" "$README_NAME"
+            git commit -m "[bot] Add video: $VIDEO_TITLE" || true
+            git push || true
+            
+            rm -f tmpvideos/*
+          done < video_data.txt
+          
+          rm -rf tmpvideos thumbnails_temp
+          echo "✅ Finished URL 4"
+
+      # ============================================
+      # DOWNLOAD STEP 5 (URL 5)
+      # ============================================
+      - name: Download and process URL 5
+        if: env.URL_5_EXISTS == 'true'
+        run: |
+          URL="${{ env.URL_5 }}"
+          echo "Processing URL 5: $URL"
+          
+          if [[ "$URL" == *"list="* ]] || [[ "$URL" == *"&list="* ]]; then
+            if [ -n "${{ inputs.playlist_items }}" ]; then
+              ITEMS_OPTION="--playlist-items ${{ inputs.playlist_items }}"
+            else
+              ITEMS_OPTION=""
+            fi
+            yt-dlp --flat-playlist --print "%(id)s|%(title)s" $ITEMS_OPTION "$URL" > video_data.txt
+          else
+            VIDEO_ID=$(yt-dlp --get-id "$URL")
+            VIDEO_TITLE=$(yt-dlp --get-title "$URL")
+            echo "${VIDEO_ID}|${VIDEO_TITLE}" > video_data.txt
+          fi
+          
+          QUALITY="${{ inputs.quality }}"
+          if [ "$QUALITY" = "audio" ]; then
+            FORMAT_OPTS="-f bestaudio --extract-audio --audio-format mp3"
+          elif [ "$QUALITY" = "best" ]; then
+            FORMAT_OPTS="-f bestvideo+bestaudio/best --merge-output-format mp4"
+          else
+            FORMAT_OPTS="-f bestvideo[height<=${QUALITY}]+bestaudio/best[height<=${QUALITY}] --merge-output-format mp4"
+          fi
+          
+          mkdir -p tmpvideos
+          cd tmpvideos
+          yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" \
+            $FORMAT_OPTS \
+            --output "%(title)s.%(ext)s" \
+            "$URL"
+          cd ..
+          
+          mkdir -p thumbnails_temp
+          
+          while IFS='|' read -r VIDEO_ID VIDEO_TITLE; do
+            if [ -z "$VIDEO_ID" ]; then continue; fi
+            
+            SAFE_NAME=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_' | sed 's/^_//;s/_$//')
+            VIDEO_FOLDER="$SAFE_NAME"
+            mkdir -p "../$VIDEO_FOLDER"
+            
+            cd tmpvideos
+            VIDEO_FILE=$(ls -1 | head -n 1)
+            zip -0 -s "${{ inputs.parts_size }}m" "../${VIDEO_FOLDER}/${SAFE_NAME}.zip" "$VIDEO_FILE"
+            cd ..
+            
+            mkdir -p "thumbnails_temp/$SAFE_NAME"
+            wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/maxresdefault.jpg" -O "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" 2>/dev/null || \
+            wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/sddefault.jpg" -O "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" 2>/dev/null || \
+            wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/hqdefault.jpg" -O "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" 2>/dev/null || true
+            
+            [ -f "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" ] && mv "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" "${VIDEO_FOLDER}/thumbnail.jpg"
+            
+            HIGHEST=$(ls README*.md 2>/dev/null | wc -l)
+            NEXT_NUM=$((HIGHEST + 1))
+            README_NAME="README.md"
+            [ $NEXT_NUM -ne 1 ] && README_NAME="README${NEXT_NUM}.md"
+            
+            echo "# 📥 Download Links - ${VIDEO_TITLE}" > "$README_NAME"
+            echo "Generated on: $(date)" >> "$README_NAME"
+            echo "" >> "$README_NAME"
+            
+            [ -f "${VIDEO_FOLDER}/thumbnail.jpg" ] && echo "- [Download Thumbnail](https://github.com/${{ github.repository }}/raw/videos/${VIDEO_FOLDER}/thumbnail.jpg)" >> "$README_NAME"
+            
+            for file in "${VIDEO_FOLDER}"/*.z[0-9]* "${VIDEO_FOLDER}"/*.zip; do
+              if [ -f "$file" ]; then
+                filename=$(basename "$file")
+                echo "- [Download $filename](https://github.com/${{ github.repository }}/raw/videos/${VIDEO_FOLDER}/$(python3 -c "import urllib.parse; print(urllib.parse.quote('$filename'))"))" >> "$README_NAME"
+              fi
+            done
+            
+            echo "${VIDEO_TITLE}|${README_NAME}|${VIDEO_FOLDER}" >> video_info.txt
+            
+            git add "$VIDEO_FOLDER" "$README_NAME"
+            git commit -m "[bot] Add video: $VIDEO_TITLE" || true
+            git push || true
+            
+            rm -f tmpvideos/*
+          done < video_data.txt
+          
+          rm -rf tmpvideos thumbnails_temp
+          echo "✅ Finished URL 5"
 
       # ============================================
       # Batch commit zip parts (5 files per commit)
@@ -543,7 +877,7 @@ jobs:
           retention-days: 1
 
   # ============================================
-  # JOB 2: Send files to Bale bot (unchanged from original)
+  # JOB 2: Send files to Bale bot
   # ============================================
   send-to-bot:
     runs-on: ubuntu-latest
