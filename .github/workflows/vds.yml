@@ -374,7 +374,7 @@ jobs:
           echo "✅ Thumbnail download complete"
 
       # ============================================
-      # STEP 4: Process each video
+      # STEP 4: Process each video (with numerical prefix for folders)
       # ============================================
       - name: Process each video
         id: process
@@ -400,13 +400,8 @@ jobs:
           echo "TOTAL_VIDEOS=$TOTAL_VIDEOS" >> $GITHUB_ENV
           echo "Found $TOTAL_VIDEOS video(s) to process"
           
-          # Simple numeric sort using version sort if available
-          SORTED_FILES=()
-          if printf '%s\n' "${VIDEO_FILES[@]}" | sort -V 2>/dev/null; then
-            SORTED_FILES=($(printf '%s\n' "${VIDEO_FILES[@]}" | sort -V))
-          else
-            SORTED_FILES=("${VIDEO_FILES[@]}")
-          fi
+          # Use simple alphabetical sort
+          SORTED_FILES=($(printf '%s\n' "${VIDEO_FILES[@]}" | sort))
           
           echo "Processing videos in order:"
           for i in "${!SORTED_FILES[@]}"; do
@@ -416,6 +411,7 @@ jobs:
           README_NUM=1
           > ../video_info.txt
           
+          COUNTER=1
           for VIDEO_FILE in "${SORTED_FILES[@]}"; do
             echo "=========================================="
             echo "Processing: $VIDEO_FILE"
@@ -423,23 +419,24 @@ jobs:
             
             # Get video title without extension
             VIDEO_TITLE="${VIDEO_FILE%.*}"
-            # Remove playlist index prefix if present
+            # Remove playlist index prefix if present (e.g., "0001 - title" -> "title")
             VIDEO_TITLE_CLEAN="${VIDEO_TITLE#* - }"
             if [ "$VIDEO_TITLE_CLEAN" = "$VIDEO_TITLE" ]; then
               VIDEO_TITLE_CLEAN="$VIDEO_TITLE"
             fi
             echo "Video title: $VIDEO_TITLE_CLEAN"
             
-            # Create safe folder name
+            # Create safe folder name with 3-digit prefix (001, 002, 003, etc.)
+            PREFIX=$(printf "%03d" $COUNTER)
             SAFE_NAME=$(echo "$VIDEO_TITLE_CLEAN" | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_' | sed 's/^_//;s/_$//')
             if [ -z "$SAFE_NAME" ]; then
-              SAFE_NAME="video_$README_NUM"
+              SAFE_NAME="video_$COUNTER"
             fi
-            VIDEO_FOLDER="$SAFE_NAME"
+            VIDEO_FOLDER="${PREFIX}_${SAFE_NAME}"
             
             mkdir -p "../$VIDEO_FOLDER"
             
-            # Split the video file
+            # Split the video file (keep original filename for the zip parts)
             echo "Splitting video into ${SAFE_NAME}.zip parts..."
             zip -0 -s "${{ inputs.parts_size }}m" "../${VIDEO_FOLDER}/${SAFE_NAME}.zip" "$VIDEO_FILE"
             
@@ -454,7 +451,7 @@ jobs:
             if [ -d "../thumbnails_temp" ]; then
               for thumb_dir in ../thumbnails_temp/*; do
                 if [ -d "$thumb_dir" ]; then
-                  if [[ "$thumb_dir" == *"${SAFE_NAME}"* ]] || [[ "$thumb_dir" == *"${VIDEO_TITLE_CLEAN}"* ]]; then
+                  if [[ "$thumb_dir" == *"${VIDEO_TITLE_CLEAN}"* ]] || [[ "$thumb_dir" == *"${VIDEO_FILE%.*}"* ]]; then
                     if [ -f "$thumb_dir/thumbnail.jpg" ]; then
                       cp "$thumb_dir/thumbnail.jpg" "../${VIDEO_FOLDER}/thumbnail.jpg"
                       THUMB_FOUND=true
@@ -504,7 +501,7 @@ jobs:
               echo "✅ Added thumbnail link"
             fi
             
-            # Add links to split zip files
+            # Add links to split zip files (these keep their original names)
             for file in "../${VIDEO_FOLDER}"/*.z[0-9]* "../${VIDEO_FOLDER}"/*.zip; do
               if [ -f "$file" ]; then
                 filename=$(basename "$file")
@@ -514,10 +511,11 @@ jobs:
               fi
             done
             
-            # Save video info
-            echo "${VIDEO_TITLE_CLEAN}||${README_NAME}" >> ../video_info.txt
+            # Save video info with the prefixed folder name for reference
+            echo "${VIDEO_TITLE_CLEAN}||${README_NAME}||${VIDEO_FOLDER}" >> ../video_info.txt
             
             README_NUM=$((README_NUM + 1))
+            COUNTER=$((COUNTER + 1))
           done
           
           cd ..
@@ -530,7 +528,7 @@ jobs:
         run: |
           echo "Starting batch commits for all video folders"
           
-          # Collect and sort video folders
+          # Collect and sort video folders (alphabetical works with our prefix)
           VIDEO_FOLDERS=()
           for VIDEO_FOLDER in */; do
             VIDEO_FOLDER="${VIDEO_FOLDER%/}"
@@ -546,11 +544,9 @@ jobs:
             VIDEO_FOLDERS+=("$VIDEO_FOLDER")
           done
           
-          # Sort folders using version sort
-          if [ ${#VIDEO_FOLDERS[@]} -gt 0 ]; then
-            IFS=$'\n' VIDEO_FOLDERS=($(printf '%s\n' "${VIDEO_FOLDERS[@]}" | sort -V))
-            unset IFS
-          fi
+          # Sort folders alphabetically (001_ comes before 002_)
+          IFS=$'\n' VIDEO_FOLDERS=($(printf '%s\n' "${VIDEO_FOLDERS[@]}" | sort))
+          unset IFS
           
           for VIDEO_FOLDER in "${VIDEO_FOLDERS[@]}"; do
             echo "Processing folder: $VIDEO_FOLDER"
@@ -672,7 +668,7 @@ jobs:
             echo "" >> MASTER_README.md
             
             README_NUM=1
-            while IFS='|' read -r title video_id readme_name; do
+            while IFS='|' read -r title video_id readme_name folder_name; do
               if [ $README_NUM -eq 1 ]; then
                 echo "1. [${title}](./README.md)" >> MASTER_README.md
               else
@@ -906,7 +902,7 @@ jobs:
           TOTAL_VIDEOS=$(wc -l < video_info.txt)
           
           VIDEO_NUM=1
-          while IFS='|' read -r video_title video_id readme_name; do
+          while IFS='|' read -r video_title readme_name folder_name; do
             echo "Sending video $VIDEO_NUM: $video_title"
             
             README_URL="https://raw.githubusercontent.com/${{ github.repository }}/videos/${readme_name}"
@@ -915,8 +911,8 @@ jobs:
             grep -oE 'https://[^ )]+\.(z[0-9]+|zip)' "$readme_name" | sort -V > extracted_links.txt
             LINK_COUNT=$(wc -l < extracted_links.txt)
             
-            SAFE_NAME=$(echo "$video_title" | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_' | sed 's/^_//;s/_$//')
-            THUMBNAIL_URL="https://raw.githubusercontent.com/${{ github.repository }}/videos/${SAFE_NAME}/thumbnail.jpg"
+            # Use the folder name to find thumbnail (it has the prefix)
+            THUMBNAIL_URL="https://raw.githubusercontent.com/${{ github.repository }}/videos/${folder_name}/thumbnail.jpg"
             curl -L -o "thumbnail_${VIDEO_NUM}.jpg" "$THUMBNAIL_URL" 2>/dev/null || true
             
             mkdir -p "video_${VIDEO_NUM}"
