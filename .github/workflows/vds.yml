@@ -143,10 +143,29 @@ jobs:
           URL="${{ inputs.youtube_url }}"
           PLAYLIST_ITEMS="${{ inputs.playlist_items }}"
           
-          if [[ "$URL" == *"list="* ]] || [[ "$URL" == *"&list="* ]]; then
-            echo "IS_PLAYLIST=true" >> $GITHUB_ENV
+          echo "Checking URL: $URL"
+          
+          # More robust playlist detection
+          IS_PLAYLIST="false"
+          
+          # Check for YouTube playlist patterns
+          if [[ "$URL" == *"/playlist"* ]] || \
+             [[ "$URL" == *"list="* ]] || \
+             [[ "$URL" == *"&list="* ]] || \
+             [[ "$URL" =~ [\?\&]list=([a-zA-Z0-9_-]+) ]]; then
+            IS_PLAYLIST="true"
             echo "✅ Detected as playlist URL"
-            
+          fi
+          
+          # Also check if it's a single video with playlist parameter (like &list=)
+          if [[ "$URL" == *"watch?v="* ]] && [[ "$URL" == *"&list="* ]]; then
+            IS_PLAYLIST="true"
+            echo "✅ Detected as single video with playlist context"
+          fi
+          
+          echo "IS_PLAYLIST=$IS_PLAYLIST" >> $GITHUB_ENV
+          
+          if [ "$IS_PLAYLIST" = "true" ]; then
             if [ -n "$PLAYLIST_ITEMS" ]; then
               ITEMS_OPTION="--playlist-items $PLAYLIST_ITEMS"
               echo "Using playlist items: $PLAYLIST_ITEMS"
@@ -156,18 +175,44 @@ jobs:
             fi
             
             echo "Extracting video IDs and titles from playlist..."
-            yt-dlp --flat-playlist --print "%(id)s|%(playlist_index)04d|%(title)s" $ITEMS_OPTION "$URL" > video_data.txt
+            
+            # Use yt-dlp to get playlist info
+            if [ -n "$PLAYLIST_ITEMS" ]; then
+              yt-dlp --flat-playlist --print "%(id)s|%(playlist_index)04d|%(title)s" \
+                --playlist-items "$PLAYLIST_ITEMS" \
+                "$URL" > video_data.txt 2>/dev/null || true
+            else
+              yt-dlp --flat-playlist --print "%(id)s|%(playlist_index)04d|%(title)s" \
+                "$URL" > video_data.txt 2>/dev/null || true
+            fi
+            
+            # Check if we got any data
+            if [ ! -s video_data.txt ]; then
+              echo "⚠️ No video data extracted, trying without flat-playlist..."
+              if [ -n "$PLAYLIST_ITEMS" ]; then
+                yt-dlp --print "%(id)s|%(playlist_index)04d|%(title)s" \
+                  --playlist-items "$PLAYLIST_ITEMS" \
+                  "$URL" > video_data.txt 2>/dev/null || true
+              else
+                yt-dlp --print "%(id)s|%(playlist_index)04d|%(title)s" \
+                  "$URL" > video_data.txt 2>/dev/null || true
+              fi
+            fi
             
             VIDEO_COUNT=$(wc -l < video_data.txt)
             echo "VIDEO_COUNT=$VIDEO_COUNT" >> $GITHUB_ENV
             echo "Found $VIDEO_COUNT videos in playlist"
             
-            echo "Extracted video data (with playlist index):"
-            cat video_data.txt
-            
+            if [ $VIDEO_COUNT -gt 0 ]; then
+              echo "Extracted video data (with playlist index):"
+              cat video_data.txt
+            else
+              echo "⚠️ No videos found in playlist. URL might be invalid or private."
+              touch video_data.txt
+            fi
           else
-            echo "IS_PLAYLIST=false" >> $GITHUB_ENV
             echo "Single video URL detected"
+            touch video_data.txt
           fi
           
           echo "$IS_PLAYLIST" > mode.txt
@@ -255,8 +300,8 @@ jobs:
       # ============================================
       - name: Download thumbnails from extracted video data
         run: |
-          if [ ! -f "video_data.txt" ]; then
-            echo "No video_data.txt found, skipping thumbnail download"
+          if [ ! -f "video_data.txt" ] || [ ! -s "video_data.txt" ]; then
+            echo "No video_data.txt found or empty, skipping thumbnail download"
             exit 0
           fi
           
@@ -329,7 +374,7 @@ jobs:
           echo "✅ Thumbnail download complete"
 
       # ============================================
-      # STEP 4: Process each video (simplified and robust)
+      # STEP 4: Process each video
       # ============================================
       - name: Process each video
         id: process
@@ -360,7 +405,6 @@ jobs:
           if printf '%s\n' "${VIDEO_FILES[@]}" | sort -V 2>/dev/null; then
             SORTED_FILES=($(printf '%s\n' "${VIDEO_FILES[@]}" | sort -V))
           else
-            # Fallback: use original order
             SORTED_FILES=("${VIDEO_FILES[@]}")
           fi
           
@@ -835,7 +879,8 @@ jobs:
             -d "text=✅ Done! Sent ${LINK_COUNT} file(s)."
 
       # ============================================
-      # PLAYLIST MODE      # ============================================
+      # PLAYLIST MODE
+      # ============================================
       - name: Download playlist artifacts
         if: env.MODE == 'playlist'
         uses: actions/download-artifact@v4
