@@ -202,21 +202,17 @@ jobs:
             --output "%(title)s.%(ext)s" \
             "${{ inputs.youtube_url }}"
 
-          # Find the downloaded file
           FILE=$(ls -1 | head -n 1)
           FILE_NO_EXTENSION="${FILE%.*}"
           echo "FILE=$FILE" >> $GITHUB_ENV
           echo "FILE_NO_EXTENSION=$FILE_NO_EXTENSION" >> $GITHUB_ENV
 
-          # Capture video title for header message
           VIDEO_TITLE=$(echo "$FILE" | sed 's/\.[^.]*$//')
           echo "VIDEO_TITLE=$VIDEO_TITLE" >> $GITHUB_ENV
 
-          # Create a safe folder name
           SAFE_NAME=$(echo "$FILE" | sed 's/\.[^.]*$//' | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_')
           echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
 
-          # Extract video ID for thumbnail
           VIDEO_URL="${{ inputs.youtube_url }}"
           VIDEO_ID=$(echo "$VIDEO_URL" | grep -oP '(?<=v=)[^&]+|(?<=youtu\.be/)[^?]+|(?<=embed/)[^?]+|(?<=shorts/)[^?]+' | head -1)
           echo "VIDEO_ID=$VIDEO_ID" >> $GITHUB_ENV
@@ -229,7 +225,6 @@ jobs:
         run: |
           cd tmpvideos
 
-          # Get list of video files
           VIDEO_FILES=()
           for f in *.mp4 *.mkv *.webm *.mp3 *.m4a; do
             if [ -f "$f" ]; then
@@ -238,7 +233,7 @@ jobs:
           done
 
           if [ ${#VIDEO_FILES[@]} -eq 0 ]; then
-            echo "❌ No video files found in tmpvideos!"
+            echo "No video files found in tmpvideos!"
             ls -la
             exit 1
           fi
@@ -247,10 +242,7 @@ jobs:
           echo "TOTAL_VIDEOS=$TOTAL_VIDEOS" >> $GITHUB_ENV
           echo "Found $TOTAL_VIDEOS video(s) to process"
 
-          # Counter for README numbering
           README_NUM=1
-
-          # Create video_info file
           > ../video_info.txt
 
           for VIDEO_FILE in "${VIDEO_FILES[@]}"; do
@@ -258,27 +250,22 @@ jobs:
             echo "Processing: $VIDEO_FILE"
             echo "=========================================="
 
-            # Get video title without extension
             VIDEO_TITLE="${VIDEO_FILE%.*}"
             echo "Video title: $VIDEO_TITLE"
 
-            # Create safe folder name
             SAFE_NAME=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_' | sed 's/^_//;s/_$//')
             VIDEO_FOLDER="$SAFE_NAME"
 
-            # Create folder for this video
             mkdir -p "../$VIDEO_FOLDER"
 
-            # Split the video file
             echo "Splitting video into ${SAFE_NAME}.zip parts..."
             zip -0 -s "${{ inputs.parts_size }}m" "../${VIDEO_FOLDER}/${SAFE_NAME}.zip" "$VIDEO_FILE"
 
             if [ $? -ne 0 ]; then
-              echo "❌ Failed to split $VIDEO_FILE"
+              echo "Failed to split $VIDEO_FILE"
               exit 1
             fi
 
-            # Extract video ID
             VIDEO_ID=""
             if [ "$IS_PLAYLIST" = "false" ]; then
               VIDEO_ID="${{ env.VIDEO_ID }}"
@@ -288,44 +275,26 @@ jobs:
 
             echo "Video ID: ${VIDEO_ID:-'not found'}"
 
-            # Download thumbnail
             if [ -n "$VIDEO_ID" ]; then
               echo "Downloading thumbnail..."
-              THUMBNAIL_DOWNLOADED=false
 
               if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/maxresdefault.jpg" -O "../${VIDEO_FOLDER}/thumbnail.jpg" 2>/dev/null; then
                 if [ -f "../${VIDEO_FOLDER}/thumbnail.jpg" ] && [ $(stat -c%s "../${VIDEO_FOLDER}/thumbnail.jpg") -gt 10000 ]; then
-                  THUMBNAIL_DOWNLOADED=true
-                  echo "✅ Downloaded maxresdefault.jpg"
+                  echo "Downloaded maxresdefault.jpg"
                 else
                   rm -f "../${VIDEO_FOLDER}/thumbnail.jpg"
-                fi
-              fi
-
-              if [ "$THUMBNAIL_DOWNLOADED" = false ]; then
-                if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/sddefault.jpg" -O "../${VIDEO_FOLDER}/thumbnail.jpg" 2>/dev/null; then
-                  if [ -f "../${VIDEO_FOLDER}/thumbnail.jpg" ] && [ $(stat -c%s "../${VIDEO_FOLDER}/thumbnail.jpg") -gt 5000 ]; then
-                    THUMBNAIL_DOWNLOADED=true
-                    echo "✅ Downloaded sddefault.jpg"
-                  else
-                    rm -f "../${VIDEO_FOLDER}/thumbnail.jpg"
-                  fi
-                fi
-              fi
-
-              if [ "$THUMBNAIL_DOWNLOADED" = false ]; then
-                if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/hqdefault.jpg" -O "../${VIDEO_FOLDER}/thumbnail.jpg" 2>/dev/null; then
-                  if [ -f "../${VIDEO_FOLDER}/thumbnail.jpg" ] && [ $(stat -c%s "../${VIDEO_FOLDER}/thumbnail.jpg") -gt 2000 ]; then
-                    THUMBNAIL_DOWNLOADED=true
-                    echo "✅ Downloaded hqdefault.jpg"
-                  else
-                    rm -f "../${VIDEO_FOLDER}/thumbnail.jpg"
+                  if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/sddefault.jpg" -O "../${VIDEO_FOLDER}/thumbnail.jpg" 2>/dev/null; then
+                    if [ -f "../${VIDEO_FOLDER}/thumbnail.jpg" ] && [ $(stat -c%s "../${VIDEO_FOLDER}/thumbnail.jpg") -gt 5000 ]; then
+                      echo "Downloaded sddefault.jpg"
+                    else
+                      rm -f "../${VIDEO_FOLDER}/thumbnail.jpg"
+                      wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/hqdefault.jpg" -O "../${VIDEO_FOLDER}/thumbnail.jpg" 2>/dev/null || true
+                    fi
                   fi
                 fi
               fi
             fi
 
-            # Generate README
             if [ $README_NUM -eq 1 ]; then
               README_NAME="README.md"
             else
@@ -334,16 +303,15 @@ jobs:
 
             echo "Creating README: $README_NAME"
 
-            cat > "../$README_NAME" << EOF
-# 📥 Download Links - ${VIDEO_TITLE}
+            {
+              echo "# 📥 Download Links - ${VIDEO_TITLE}"
+              echo ""
+              echo "Generated on: $(date)"
+              echo ""
+              echo "## Download Links"
+              echo ""
+            } > "../$README_NAME"
 
-Generated on: $(date)
-
-## Download Links
-
-EOF
-
-            # Add links to files
             for file in "../${VIDEO_FOLDER}"/*; do
               if [ -f "$file" ]; then
                 filename=$(basename "$file")
@@ -353,7 +321,6 @@ EOF
               fi
             done
 
-            # Save video info
             echo "${VIDEO_TITLE}|${VIDEO_ID}|${README_NAME}" >> ../video_info.txt
 
             README_NUM=$((README_NUM + 1))
@@ -363,15 +330,11 @@ EOF
 
       - name: Batch commit zip parts
         run: |
-          echo "=========================================="
           echo "Starting batch commits for all video folders"
-          echo "=========================================="
 
-          # Process each video folder
           for VIDEO_FOLDER in */; do
             VIDEO_FOLDER="${VIDEO_FOLDER%/}"
 
-            # Skip README files and non-directories
             if [ ! -d "$VIDEO_FOLDER" ]; then
               continue
             fi
@@ -381,7 +344,6 @@ EOF
 
             echo "Processing folder: $VIDEO_FOLDER"
 
-            # Get list of files in this folder
             cd "$VIDEO_FOLDER"
 
             FILES=()
@@ -392,7 +354,7 @@ EOF
             done
 
             if [ ${#FILES[@]} -eq 0 ]; then
-              echo "⚠️ No files found in $VIDEO_FOLDER"
+              echo "No files found in $VIDEO_FOLDER"
               cd ..
               continue
             fi
@@ -400,7 +362,6 @@ EOF
             TOTAL_FILES=${#FILES[@]}
             echo "Found $TOTAL_FILES files to commit in $VIDEO_FOLDER"
 
-            # Commit in batches of 5
             BATCH_SIZE=5
             BATCH_NUM=1
             BATCH_FILES=()
@@ -414,7 +375,7 @@ EOF
                 git add "${VIDEO_FOLDER}/${BATCH_FILES[@]}"
                 git commit -m "[bot] Add ${VIDEO_FOLDER} batch $BATCH_NUM (${#BATCH_FILES[@]} files)"
                 git push
-                echo "✅ Batch $BATCH_NUM committed and pushed"
+                echo "Batch $BATCH_NUM committed and pushed"
 
                 BATCH_FILES=()
                 BATCH_NUM=$((BATCH_NUM + 1))
@@ -423,14 +384,13 @@ EOF
               fi
             done
 
-            # Commit remaining files
             if [ ${#BATCH_FILES[@]} -gt 0 ]; then
               echo "Committing final batch for $VIDEO_FOLDER"
               cd ../..
               git add "${VIDEO_FOLDER}/${BATCH_FILES[@]}"
               git commit -m "[bot] Add ${VIDEO_FOLDER} final batch (${#BATCH_FILES[@]} files)"
               git push
-              echo "✅ Final batch committed and pushed"
+              echo "Final batch committed and pushed"
               sleep 2
               cd "$VIDEO_FOLDER"
             fi
@@ -440,11 +400,8 @@ EOF
 
       - name: Batch commit README files
         run: |
-          echo "=========================================="
           echo "Committing README files in batches of 5"
-          echo "=========================================="
 
-          # Get all README files
           README_FILES=()
           for f in README*.md; do
             if [ -f "$f" ]; then
@@ -469,7 +426,7 @@ EOF
               git add "${BATCH_README[@]}"
               git commit -m "[bot] Add READMEs batch $BATCH_NUM (${#BATCH_README[@]} files)"
               git push
-              echo "✅ README batch $BATCH_NUM committed and pushed"
+              echo "README batch $BATCH_NUM committed and pushed"
 
               BATCH_README=()
               BATCH_NUM=$((BATCH_NUM + 1))
@@ -477,13 +434,12 @@ EOF
             fi
           done
 
-          # Commit remaining READMEs
           if [ ${#BATCH_README[@]} -gt 0 ]; then
             echo "Committing final README batch"
             git add "${BATCH_README[@]}"
             git commit -m "[bot] Add READMEs final batch (${#BATCH_README[@]} files)"
             git push
-            echo "✅ Final README batch committed and pushed"
+            echo "Final README batch committed and pushed"
           fi
 
       - name: Create master README
@@ -492,14 +448,12 @@ EOF
           if [ -f "video_info.txt" ] && [ "$(wc -l < video_info.txt)" -gt 1 ]; then
             echo "Creating master README..."
 
-            cat > MASTER_README.md << 'EOF'
-# 🎬 Playlist Download Complete
-
-Generated on: $(date)
-
-## Downloaded Videos
-
-EOF
+            echo "# 🎬 Playlist Download Complete" > MASTER_README.md
+            echo "" >> MASTER_README.md
+            echo "Generated on: $(date)" >> MASTER_README.md
+            echo "" >> MASTER_README.md
+            echo "## Downloaded Videos" >> MASTER_README.md
+            echo "" >> MASTER_README.md
 
             README_NUM=1
             while IFS='|' read -r title video_id readme_name; do
@@ -529,10 +483,6 @@ EOF
           echo "${{ env.VIDEO_TITLE }}" > video_title.txt
           echo "README.md" > readme_name.txt
           echo "${{ env.SAFE_NAME }}/thumbnail.jpg" > thumbnail_path.txt
-
-          if [ -f "${{ env.SAFE_NAME }}/thumbnail.jpg" ]; then
-            echo "THUMBNAIL_EXISTS=true" >> $GITHUB_ENV
-          fi
 
       - name: Upload single video artifacts
         if: env.IS_PLAYLIST == 'false'
@@ -605,13 +555,11 @@ EOF
 
           curl -L -o "$README_FILE" "$README_URL"
 
-          # Extract download links
           grep -oE 'https://[^ )]+\.(z[0-9]+|zip)' "$README_FILE" > extracted_links.txt
 
           LINK_COUNT=$(wc -l < extracted_links.txt)
           echo "LINK_COUNT=$LINK_COUNT" >> $GITHUB_ENV
 
-          # Download files
           mkdir -p downloaded_files
           cd downloaded_files
           while IFS= read -r LINK; do
@@ -619,7 +567,6 @@ EOF
           done < ../extracted_links.txt
           cd ..
 
-          # Send thumbnail and files
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
           VIDEO_TITLE="${{ env.VIDEO_TITLE }}"
@@ -700,30 +647,23 @@ EOF
 
           VIDEO_NUM=1
           while IFS='|' read -r video_title video_id readme_name; do
-            echo "=========================================="
             echo "Sending video $VIDEO_NUM: $video_title"
-            echo "=========================================="
 
-            # Fetch the README for this video
             README_URL="https://raw.githubusercontent.com/${{ github.repository }}/videos/${readme_name}"
             curl -L -o "$readme_name" "$README_URL"
 
-            # Extract download links
             grep -oE 'https://[^ )]+\.(z[0-9]+|zip)' "$readme_name" > extracted_links.txt
             LINK_COUNT=$(wc -l < extracted_links.txt)
 
-            # Send video info message
             curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
               -d "chat_id=${CHAT_ID}" \
               -d "text=🎬 *${video_title}*%0A📋 Video ${VIDEO_NUM} of ${TOTAL_VIDEOS}%0A📦 Found ${LINK_COUNT} link(s)%0A⬇️ Downloading and sending..." \
               -d "parse_mode=Markdown"
 
-            # Download the thumbnail for this video
             SAFE_NAME=$(echo "$video_title" | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_' | sed 's/^_//;s/_$//')
             THUMBNAIL_URL="https://raw.githubusercontent.com/${{ github.repository }}/videos/${SAFE_NAME}/thumbnail.jpg"
             curl -L -o "thumbnail_${VIDEO_NUM}.jpg" "$THUMBNAIL_URL" 2>/dev/null || true
 
-            # Download the actual video parts
             mkdir -p "video_${VIDEO_NUM}"
             cd "video_${VIDEO_NUM}"
 
@@ -734,7 +674,6 @@ EOF
               LINK_NUM=$((LINK_NUM + 1))
             done < ../extracted_links.txt
 
-            # Send thumbnail with caption
             if [ -f "../thumbnail_${VIDEO_NUM}.jpg" ] && [ -s "../thumbnail_${VIDEO_NUM}.jpg" ]; then
               CAPTION=$(printf "🎬 *%s*\n🎚️ Quality: %s\n\n📦 Found %s link(s)\n⬇️ Download complete!" "$video_title" "$QUALITY_DISPLAY" "$LINK_COUNT")
               curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendPhoto" \
@@ -744,7 +683,6 @@ EOF
                 -F "parse_mode=Markdown"
             fi
 
-            # Send all file parts
             for FILE in *; do
               if [ -f "$FILE" ] && [ -s "$FILE" ]; then
                 SIZE=$(stat -c%s "$FILE")
@@ -759,7 +697,6 @@ EOF
 
             cd ..
 
-            # Clean up
             rm -rf "video_${VIDEO_NUM}" extracted_links.txt "thumbnail_${VIDEO_NUM}.jpg"
 
             VIDEO_NUM=$((VIDEO_NUM + 1))
@@ -787,4 +724,4 @@ EOF
         run: |
           rm -f README*.md video_title.txt download_status.txt extracted_links.txt readme_name.txt thumbnail.jpg video_info.txt
           rm -rf downloaded_files tmpvideos
-          echo "🧹 Cleaned up temporary files"
+          echo "Cleaned up temporary files"
