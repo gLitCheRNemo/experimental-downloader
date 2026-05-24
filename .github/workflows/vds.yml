@@ -21,7 +21,7 @@ on:
           - 480
           - audio
       playlist_items:
-        description: '📋 Playlist items (e.g., 1-10, 5, 3-19). Leave empty for all. For single video, leave empty too.'
+        description: '📋 Playlist items to download (e.g., 1-10, 5, 3-19). Leave empty for all. For single video, leave empty too.'
         required: false
         type: string
         default: ''
@@ -701,6 +701,9 @@ jobs:
             fi
           fi
 
+      # ============================================
+      # SINGLE VIDEO MODE (unchanged)
+      # ============================================
       - name: Download single video artifacts
         if: env.MODE == 'single'
         uses: actions/download-artifact@v4
@@ -790,6 +793,9 @@ jobs:
             -d "chat_id=${CHAT_ID}" \
             -d "text=✅ Done! Sent ${LINK_COUNT} file(s)."
 
+      # ============================================
+      # PLAYLIST MODE (modified: consolidated messaging)
+      # ============================================
       - name: Download playlist artifacts
         if: env.MODE == 'playlist'
         uses: actions/download-artifact@v4
@@ -813,10 +819,6 @@ jobs:
           fi
           
           TOTAL_VIDEOS=$(wc -l < video_info.txt)
-          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-            -d "chat_id=${CHAT_ID}" \
-            -d "text=🎬 *Playlist Download Started!*%0A%0A📋 Total videos: ${TOTAL_VIDEOS}%0A🎚️ Quality: ${QUALITY_DISPLAY}%0A%0A⬇️ Processing each video in order..." \
-            -d "parse_mode=Markdown"
           
           VIDEO_NUM=1
           while IFS='|' read -r video_title video_id readme_name; do
@@ -827,11 +829,6 @@ jobs:
             
             grep -oE 'https://[^ )]+\.(z[0-9]+|zip)' "$readme_name" > extracted_links.txt
             LINK_COUNT=$(wc -l < extracted_links.txt)
-            
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-              -d "chat_id=${CHAT_ID}" \
-              -d "text=🎬 *${video_title}*%0A📋 Video ${VIDEO_NUM} of ${TOTAL_VIDEOS}%0A📦 Found ${LINK_COUNT} link(s)%0A⬇️ Downloading and sending..." \
-              -d "parse_mode=Markdown"
             
             SAFE_NAME=$(echo "$video_title" | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_' | sed 's/^_//;s/_$//')
             THUMBNAIL_URL="https://raw.githubusercontent.com/${{ github.repository }}/videos/${SAFE_NAME}/thumbnail.jpg"
@@ -847,15 +844,24 @@ jobs:
               LINK_NUM=$((LINK_NUM + 1))
             done < ../extracted_links.txt
             
+            # Send thumbnail with caption (includes video number, no separate message)
             if [ -f "../thumbnail_${VIDEO_NUM}.jpg" ] && [ -s "../thumbnail_${VIDEO_NUM}.jpg" ]; then
-              CAPTION=$(printf "🎬 *%s*\n🎚️ Quality: %s\n\n📦 Found %s link(s)\n⬇️ Download complete!" "$video_title" "$QUALITY_DISPLAY" "$LINK_COUNT")
+              CAPTION=$(printf "🎬 *%s*\n🎚️ Quality: %s\n\n📋 Video %s of %s\n📦 Found %s link(s)\n⬇️ Download complete!" "$video_title" "$QUALITY_DISPLAY" "$VIDEO_NUM" "$TOTAL_VIDEOS" "$LINK_COUNT")
               curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendPhoto" \
                 -F "chat_id=${CHAT_ID}" \
                 -F "photo=@../thumbnail_${VIDEO_NUM}.jpg" \
                 -F "caption=${CAPTION}" \
                 -F "parse_mode=Markdown"
+            else
+              # Fallback if no thumbnail - send text message with same info
+              TEXT_MSG=$(printf "🎬 *%s*\n🎚️ Quality: %s\n\n📋 Video %s of %s\n📦 Found %s link(s)\n⬇️ Download complete!" "$video_title" "$QUALITY_DISPLAY" "$VIDEO_NUM" "$TOTAL_VIDEOS" "$LINK_COUNT")
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+                -d "chat_id=${CHAT_ID}" \
+                -d "text=${TEXT_MSG}" \
+                -d "parse_mode=Markdown"
             fi
             
+            # Send all file parts
             for FILE in *; do
               if [ -f "$FILE" ] && [ -s "$FILE" ]; then
                 SIZE=$(stat -c%s "$FILE")
