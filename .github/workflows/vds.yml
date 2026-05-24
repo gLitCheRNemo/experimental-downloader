@@ -424,14 +424,28 @@ jobs:
               echo "✅ Added thumbnail link to README"
             fi
             
-            # Add links to split zip files
+            # ============================================
+            # FIXED: Add links to split zip files with NATURAL SORTING
+            # This ensures .z01, .z02, ..., .z09, .z10, .z11 order
+            # ============================================
+            ZIP_FILES=()
             for file in "../${VIDEO_FOLDER}"/*.z[0-9]* "../${VIDEO_FOLDER}"/*.zip; do
               if [ -f "$file" ]; then
-                filename=$(basename "$file")
-                encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
-                url="https://github.com/${{ github.repository }}/raw/videos/${VIDEO_FOLDER}/$encoded_filename"
-                echo "- [Download $filename]($url)" >> "../$README_NAME"
+                ZIP_FILES+=("$(basename "$file")")
               fi
+            done
+            
+            # Sort using version sort (natural order) for correct numerical sorting
+            # This puts .z01, .z02, .z03, ... .z09, .z10, .z11 in correct order
+            if [ ${#ZIP_FILES[@]} -gt 0 ]; then
+              IFS=$'\n' ZIP_FILES=($(printf '%s\n' "${ZIP_FILES[@]}" | sort -V))
+              unset IFS
+            fi
+            
+            for filename in "${ZIP_FILES[@]}"; do
+              encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
+              url="https://github.com/${{ github.repository }}/raw/videos/${VIDEO_FOLDER}/$encoded_filename"
+              echo "- [Download $filename]($url)" >> "../$README_NAME"
             done
             
             # Get video ID from the video file (for single video mode)
