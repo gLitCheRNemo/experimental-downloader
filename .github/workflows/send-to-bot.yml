@@ -22,7 +22,7 @@ on:
         type: string
         default: 'all'
       include_thumbnail:
-        description: '🖼️ Include thumbnail with caption (like VDS) - searches README for thumbnail.jpg link'
+        description: '🖼️ Include thumbnail with caption for each README - searches README for thumbnail.jpg link'
         required: false
         default: 'false'
         type: boolean
@@ -53,8 +53,7 @@ jobs:
           PART_NUMBERS="${{ inputs.part_numbers }}"
           INCLUDE_THUMBNAIL="${{ inputs.include_thumbnail }}"
           
-          > all_extracted_links.txt
-          > readme_files_list.txt
+          > readme_batches.txt
           
           # Function to expand ranges like 1-10 into a list of numbers
           expand_ranges() {
@@ -84,10 +83,8 @@ jobs:
           parse_part_numbers() {
             local input="$1"
             local result=""
-            # Split by comma
             IFS=',' read -ra PARTS <<< "$input"
             for part in "${PARTS[@]}"; do
-              # Trim whitespace
               part=$(echo "$part" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
               if [ -n "$part" ]; then
                 if [ "$part" = "all" ]; then
@@ -126,64 +123,6 @@ jobs:
             fi
           }
           
-          # Function to get all README files from a branch
-          get_all_readme_files() {
-            local branch="$1"
-            local repo="$2"
-            local files=$(git ls-tree "$branch" --name-only | grep -E '^README[0-9]*\.md$' | sort -V)
-            echo "$files"
-          }
-          
-          # Function to extract all part numbers from a README (from .z01 to .zNN to final .zip)
-          extract_all_parts_from_readme() {
-            local readme_file="$1"
-            local base_url=""
-            local all_links=""
-            
-            # Extract the base URL pattern from the README
-            # Look for first .z01 link to get the pattern
-            FIRST_Z01=$(grep -oP '\]\(\Khttps://[^)]+\.z01' "$readme_file" 2>/dev/null | head -1)
-            if [ -n "$FIRST_Z01" ]; then
-              # Remove .z01 from the end to get base URL
-              BASE_URL="${FIRST_Z01%.z01}"
-            else
-              # Try to find any .zNN pattern
-              FIRST_Z=$(grep -oP '\]\(\Khttps://[^)]+\.z[0-9]+' "$readme_file" 2>/dev/null | head -1)
-              if [ -n "$FIRST_Z" ]; then
-                BASE_URL="${FIRST_Z%.z*}"
-              fi
-            fi
-            
-            if [ -n "$BASE_URL" ]; then
-              echo "Found base URL: $BASE_URL"
-              
-              # Find all .zNN parts by incrementing until not found
-              PART_NUM=1
-              while true; do
-                PART_NUM_PADDED=$(printf "%02d" $PART_NUM)
-                LINK="${BASE_URL}.z${PART_NUM_PADDED}"
-                if grep -q "$LINK" "$readme_file"; then
-                  echo "$LINK" >> all_extracted_links.txt
-                  echo "Found link for .z${PART_NUM_PADDED}"
-                  PART_NUM=$((PART_NUM + 1))
-                else
-                  break
-                fi
-              done
-              
-              # Get the final .zip link
-              ZIP_LINK="${BASE_URL}.zip"
-              if grep -q "$ZIP_LINK" "$readme_file"; then
-                echo "$ZIP_LINK" >> all_extracted_links.txt
-                echo "Found link for final .zip"
-              fi
-            else
-              # Fallback: extract all links from README
-              grep -oP '\]\(\Khttps://[^)]+' "$readme_file" >> all_extracted_links.txt 2>/dev/null || true
-              grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' "$readme_file" >> all_extracted_links.txt 2>/dev/null || true
-            fi
-          }
-          
           # Extract video title from README
           extract_video_title() {
             local readme_file="$1"
@@ -207,12 +146,69 @@ jobs:
             echo "$thumb_link"
           }
           
+          # Function to extract all part numbers from a README (from .z01 to .zNN to final .zip)
+          extract_all_parts_from_readme() {
+            local readme_file="$1"
+            local output_file="$2"
+            local base_url=""
+            local link_count=0
+            
+            # Extract the base URL pattern from the README
+            FIRST_Z01=$(grep -oP '\]\(\Khttps://[^)]+\.z01' "$readme_file" 2>/dev/null | head -1)
+            if [ -n "$FIRST_Z01" ]; then
+              BASE_URL="${FIRST_Z01%.z01}"
+            else
+              FIRST_Z=$(grep -oP '\]\(\Khttps://[^)]+\.z[0-9]+' "$readme_file" 2>/dev/null | head -1)
+              if [ -n "$FIRST_Z" ]; then
+                BASE_URL="${FIRST_Z%.z*}"
+              fi
+            fi
+            
+            if [ -n "$BASE_URL" ]; then
+              # Find all .zNN parts by incrementing until not found
+              PART_NUM=1
+              while true; do
+                PART_NUM_PADDED=$(printf "%02d" $PART_NUM)
+                LINK="${BASE_URL}.z${PART_NUM_PADDED}"
+                if grep -q "$LINK" "$readme_file"; then
+                  echo "$LINK" >> "$output_file"
+                  link_count=$((link_count + 1))
+                  PART_NUM=$((PART_NUM + 1))
+                else
+                  break
+                fi
+              done
+              
+              # Get the final .zip link
+              ZIP_LINK="${BASE_URL}.zip"
+              if grep -q "$ZIP_LINK" "$readme_file"; then
+                echo "$ZIP_LINK" >> "$output_file"
+                link_count=$((link_count + 1))
+              fi
+            else
+              # Fallback: extract all links from README
+              grep -oP '\]\(\Khttps://[^)]+' "$readme_file" >> "$output_file" 2>/dev/null || true
+              grep -oE 'https://raw\.githubusercontent\.com/[^ ]+' "$readme_file" >> "$output_file" 2>/dev/null || true
+              link_count=$(wc -l < "$output_file")
+            fi
+            
+            echo "$link_count"
+          }
+          
           # Case 1: raw_links is provided (use it directly)
           if [ -n "$RAW_LINKS" ]; then
             echo "Using raw_links input"
-            echo "$RAW_LINKS" | tr ' ' '\n' | grep -E 'https?://' >> all_extracted_links.txt
+            echo "$RAW_LINKS" | tr ' ' '\n' | grep -E 'https?://' > all_links.txt
+            LINK_COUNT=$(wc -l < all_links.txt)
+            echo "LINKS_FILE=all_links.txt" >> $GITHUB_ENV
+            echo "TOTAL_BATCHES=1" >> $GITHUB_ENV
             echo "SOURCE=raw_links" >> $GITHUB_ENV
             echo "INCLUDE_THUMBNAIL=false" >> $GITHUB_ENV
+            # Create batch info for raw links
+            echo "TITLE_0=Raw Links" >> batch_info.txt
+            echo "THUMBNAIL_0=" >> batch_info.txt
+            echo "LINK_COUNT_0=$LINK_COUNT" >> batch_info.txt
+            echo "LINKS_FILE_0=all_links.txt" >> batch_info.txt
           
           # Case 2: branch_name is provided
           elif [ -n "$BRANCH_NAME" ]; then
@@ -241,9 +237,9 @@ jobs:
             echo "README numbers to process: $README_NUMS"
             
             REPO="${{ github.repository }}"
-            TOTAL_README_COUNT=0
+            BATCH_INDEX=0
+            > batch_info.txt
             
-            # First, collect all README files to process
             for README_NUM in $README_NUMS; do
               README_FILE=$(get_readme_filename "$README_NUM")
               echo "Processing README: $README_FILE"
@@ -260,53 +256,43 @@ jobs:
               fi
               
               echo "✅ $README_FILE fetched successfully"
-              echo "$README_NUM|README_${README_NUM}.md" >> readme_files_list.txt
-              TOTAL_README_COUNT=$((TOTAL_README_COUNT + 1))
               
-              # For thumbnail mode, extract title and thumbnail from first README
-              if [ "$INCLUDE_THUMBNAIL" = "true" ] && [ $TOTAL_README_COUNT -eq 1 ]; then
-                VIDEO_TITLE=$(extract_video_title "README_${README_NUM}.md")
-                THUMBNAIL_LINK=$(extract_thumbnail_link "README_${README_NUM}.md")
-                echo "VIDEO_TITLE=$VIDEO_TITLE" >> $GITHUB_ENV
-                echo "THUMBNAIL_LINK=$THUMBNAIL_LINK" >> $GITHUB_ENV
-                echo "✅ Extracted title: $VIDEO_TITLE"
-              fi
-            done
-            
-            # Process each README
-            README_INDEX=0
-            for README_INFO in $(cat readme_files_list.txt); do
-              README_NUM=$(echo "$README_INFO" | cut -d'|' -f1)
-              README_FILE=$(echo "$README_INFO" | cut -d'|' -f2)
+              # Extract title and thumbnail for this README
+              VIDEO_TITLE=$(extract_video_title "README_${README_NUM}.md")
+              THUMBNAIL_LINK=$(extract_thumbnail_link "README_${README_NUM}.md")
               
-              echo "Extracting from README ${README_NUM} ($README_FILE)"
+              echo "TITLE_${BATCH_INDEX}=${VIDEO_TITLE}" >> batch_info.txt
+              echo "THUMBNAIL_${BATCH_INDEX}=${THUMBNAIL_LINK}" >> batch_info.txt
+              echo "README_NUM_${BATCH_INDEX}=${README_NUM}" >> batch_info.txt
               
-              # Check if part_numbers is "all"
+              # Extract links for this README
+              LINKS_FILE="links_batch_${BATCH_INDEX}.txt"
+              > "$LINKS_FILE"
+              
               if [ "$PART_NUMBERS" = "all" ]; then
                 echo "  Using 'all' mode - extracting all parts from this README"
-                extract_all_parts_from_readme "$README_FILE"
+                LINK_COUNT=$(extract_all_parts_from_readme "README_${README_NUM}.md" "$LINKS_FILE")
               else
-                # Parse part numbers
                 PARSED_PARTS=$(parse_part_numbers "$PART_NUMBERS")
-                
-                # Check if result is "all"
                 if [ "$PARSED_PARTS" = "all" ]; then
                   echo "  Using 'all' mode - extracting all parts from this README"
-                  extract_all_parts_from_readme "$README_FILE"
+                  LINK_COUNT=$(extract_all_parts_from_readme "README_${README_NUM}.md" "$LINKS_FILE")
                 else
-                  # Process specific part numbers
+                  LINK_COUNT=0
                   for PART_NUM in $PARSED_PARTS; do
                     if [ "$PART_NUM" = "final" ] || [ "$PART_NUM" = "0" ]; then
-                      LINK=$(grep -oP '\]\(\Khttps://[^)]+\.zip' "$README_FILE" | head -1)
+                      LINK=$(grep -oP '\]\(\Khttps://[^)]+\.zip' "README_${README_NUM}.md" | head -1)
                       if [ -n "$LINK" ]; then
-                        echo "$LINK" >> all_extracted_links.txt
+                        echo "$LINK" >> "$LINKS_FILE"
+                        LINK_COUNT=$((LINK_COUNT + 1))
                         echo "  Found link for final .zip"
                       fi
                     else
                       PART_NUM_PADDED=$(printf "%02d" $PART_NUM)
-                      LINK=$(grep -oP '\]\(\Khttps://[^)]+\.z'"${PART_NUM_PADDED}" "$README_FILE" | head -1)
+                      LINK=$(grep -oP '\]\(\Khttps://[^)]+\.z'"${PART_NUM_PADDED}" "README_${README_NUM}.md" | head -1)
                       if [ -n "$LINK" ]; then
-                        echo "$LINK" >> all_extracted_links.txt
+                        echo "$LINK" >> "$LINKS_FILE"
+                        LINK_COUNT=$((LINK_COUNT + 1))
                         echo "  Found link for .z${PART_NUM_PADDED}"
                       fi
                     fi
@@ -314,9 +300,16 @@ jobs:
                 fi
               fi
               
-              README_INDEX=$((README_INDEX + 1))
+              echo "LINK_COUNT_${BATCH_INDEX}=${LINK_COUNT}" >> batch_info.txt
+              echo "LINKS_FILE_${BATCH_INDEX}=${LINKS_FILE}" >> batch_info.txt
+              
+              echo "  Found $LINK_COUNT links for README ${README_NUM}"
+              
+              BATCH_INDEX=$((BATCH_INDEX + 1))
             done
             
+            TOTAL_BATCHES=$BATCH_INDEX
+            echo "TOTAL_BATCHES=$TOTAL_BATCHES" >> $GITHUB_ENV
             echo "SOURCE=branch_specific" >> $GITHUB_ENV
             echo "INCLUDE_THUMBNAIL=$INCLUDE_THUMBNAIL" >> $GITHUB_ENV
           
@@ -326,129 +319,103 @@ jobs:
             echo "  - branch_name (with optional readme_numbers and part_numbers)"
             exit 1
           fi
-          
-          # Clean up extracted links
-          sed -i 's/^[[:space:]]*//;s/[[:space:]]*$//' all_extracted_links.txt
-          sed -i '/^$/d' all_extracted_links.txt
-          
-          LINK_COUNT=$(wc -l < all_extracted_links.txt)
-          echo "LINK_COUNT=$LINK_COUNT" >> $GITHUB_ENV
-          
-          echo "=========================================="
-          echo "Found $LINK_COUNT links to process:"
-          echo "=========================================="
-          cat all_extracted_links.txt
-          echo "=========================================="
-          
-          if [ "$LINK_COUNT" -eq 0 ]; then
-            echo "❌ No links found to process"
-            exit 1
-          fi
-          
-          # Copy to standard filename for subsequent steps
-          cp all_extracted_links.txt extracted_links.txt
 
-      - name: Download thumbnail (if enabled)
-        if: env.INCLUDE_THUMBNAIL == 'true' && env.THUMBNAIL_LINK != ''
-        run: |
-          echo "Downloading thumbnail from: ${{ env.THUMBNAIL_LINK }}"
-          curl -L -o thumbnail.jpg "${{ env.THUMBNAIL_LINK }}"
-          if [ -f "thumbnail.jpg" ] && [ -s "thumbnail.jpg" ]; then
-            echo "✅ Thumbnail downloaded successfully"
-            echo "THUMBNAIL_DOWNLOADED=true" >> $GITHUB_ENV
-          else
-            echo "⚠️ Failed to download thumbnail"
-            echo "THUMBNAIL_DOWNLOADED=false" >> $GITHUB_ENV
-          fi
-
-      - name: Download files using wget
-        run: |
-          mkdir -p downloaded_files
-          cd downloaded_files
-          
-          LINK_NUM=1
-          while IFS= read -r LINK; do
-            if [ -n "$LINK" ]; then
-              echo "=========================================="
-              echo "Downloading file $LINK_NUM of ${{ env.LINK_COUNT }} from:"
-              echo "$LINK"
-              echo "=========================================="
-              
-              wget --content-disposition --trust-server-names --max-redirect=5 "$LINK"
-              
-              DOWNLOADED_FILE=$(ls -1 | head -n 1)
-              echo "Downloaded file: $DOWNLOADED_FILE"
-              
-              if [ -f "$DOWNLOADED_FILE" ] && [ -s "$DOWNLOADED_FILE" ]; then
-                SIZE=$(stat -c%s "$DOWNLOADED_FILE")
-                SIZE_MB=$((SIZE / 1024 / 1024))
-                echo "✅ Downloaded: $DOWNLOADED_FILE (${SIZE_MB} MB)"
-                echo "$DOWNLOADED_FILE:SUCCESS:$SIZE" >> ../download_status.txt
-              else
-                echo "❌ Failed to download from: $LINK"
-                echo "unknown:FAILED:0" >> ../download_status.txt
-              fi
-              
-              LINK_NUM=$((LINK_NUM + 1))
-              echo ""
-            fi
-          done < ../extracted_links.txt
-          
-          cd ..
-          
-          echo "Files in downloaded_files directory:"
-          ls -lh downloaded_files/
-
-      - name: Send files to Bale bot (with or without thumbnail)
+      - name: Process and send each batch
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
-          LINK_COUNT="${{ env.LINK_COUNT }}"
+          TOTAL_BATCHES="${{ env.TOTAL_BATCHES }}"
           INCLUDE_THUMBNAIL="${{ env.INCLUDE_THUMBNAIL }}"
-          VIDEO_TITLE="${{ env.VIDEO_TITLE }}"
           
-          if [ "$INCLUDE_THUMBNAIL" = "true" ] && [ -f "thumbnail.jpg" ] && [ -s "thumbnail.jpg" ]; then
-            echo "Sending thumbnail with caption (VDS style)..."
-            CAPTION=$(printf "🎬 *%s*\n\n📦 Found %s link(s)\n⬇️ Downloading and sending..." "$VIDEO_TITLE" "$LINK_COUNT")
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendPhoto" \
-              -F "chat_id=${CHAT_ID}" \
-              -F "photo=@thumbnail.jpg" \
-              -F "caption=${CAPTION}" \
-              -F "parse_mode=Markdown"
-          else
-            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-              -d "chat_id=${CHAT_ID}" \
-              -d "text=📦 Found ${LINK_COUNT} link(s). Downloading and sending..."
-          fi
+          echo "Processing $TOTAL_BATCHES batch(es)"
           
-          cd downloaded_files
-          
-          FILE_NUM=1
-          for FILE in *; do
-            if [ -f "$FILE" ] && [ -s "$FILE" ]; then
-              SIZE=$(stat -c%s "$FILE")
-              SIZE_MB=$((SIZE / 1024 / 1024))
-              
-              echo "Sending file $FILE_NUM: $FILE (${SIZE_MB} MB)"
-              
-              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
-                -F "chat_id=${CHAT_ID}" \
-                -F "document=@${FILE}" \
-                -F "caption=${FILE} | ${SIZE_MB} MB"
-              
-              echo "✅ Sent $FILE"
-              
-              FILE_NUM=$((FILE_NUM + 1))
-              sleep 1
+          for BATCH_NUM in $(seq 1 $TOTAL_BATCHES); do
+            BATCH_INDEX=$((BATCH_NUM - 1))
+            
+            # Get info for this batch
+            LINKS_FILE=$(grep "LINKS_FILE_${BATCH_INDEX}=" batch_info.txt | cut -d'=' -f2-)
+            LINK_COUNT=$(grep "LINK_COUNT_${BATCH_INDEX}=" batch_info.txt | cut -d'=' -f2)
+            VIDEO_TITLE=$(grep "TITLE_${BATCH_INDEX}=" batch_info.txt | cut -d'=' -f2-)
+            THUMBNAIL_LINK=$(grep "THUMBNAIL_${BATCH_INDEX}=" batch_info.txt | cut -d'=' -f2-)
+            README_NUM=$(grep "README_NUM_${BATCH_INDEX}=" batch_info.txt | cut -d'=' -f2)
+            
+            echo "=========================================="
+            echo "Processing batch $BATCH_NUM of $TOTAL_BATCHES (README${README_NUM}.md)"
+            echo "Found $LINK_COUNT links in this batch"
+            echo "Video title: $VIDEO_TITLE"
+            echo "=========================================="
+            
+            # Download and send thumbnail for this batch if enabled
+            if [ "$INCLUDE_THUMBNAIL" = "true" ] && [ -n "$THUMBNAIL_LINK" ]; then
+              echo "Downloading thumbnail from: $THUMBNAIL_LINK"
+              curl -L -o "thumbnail_${BATCH_NUM}.jpg" "$THUMBNAIL_LINK"
+              if [ -f "thumbnail_${BATCH_NUM}.jpg" ] && [ -s "thumbnail_${BATCH_NUM}.jpg" ]; then
+                # Caption with THIS BATCH's link count
+                CAPTION=$(printf "🎬 *%s*\n\n📦 Found %s link(s)\n⬇️ Downloading and sending..." "$VIDEO_TITLE" "$LINK_COUNT")
+                curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendPhoto" \
+                  -F "chat_id=${CHAT_ID}" \
+                  -F "photo=@thumbnail_${BATCH_NUM}.jpg" \
+                  -F "caption=${CAPTION}" \
+                  -F "parse_mode=Markdown"
+                echo "✅ Sent thumbnail for batch $BATCH_NUM"
+              else
+                echo "⚠️ Failed to download thumbnail, sending text instead"
+                TEXT_MSG=$(printf "🎬 *%s*\n\n📦 Found %s link(s)\n⬇️ Downloading and sending..." "$VIDEO_TITLE" "$LINK_COUNT")
+                curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+                  -d "chat_id=${CHAT_ID}" \
+                  -d "text=${TEXT_MSG}" \
+                  -d "parse_mode=Markdown"
+              fi
+            else
+              # No thumbnail - send text message for this batch
+              TEXT_MSG=$(printf "📋 Batch %s of %s (README%s.md)\n📦 Found %s link(s)\n⬇️ Downloading and sending..." "$BATCH_NUM" "$TOTAL_BATCHES" "$README_NUM" "$LINK_COUNT")
+              curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+                -d "chat_id=${CHAT_ID}" \
+                -d "text=${TEXT_MSG}"
             fi
+            
+            # Download files for this batch
+            mkdir -p "downloaded_batch_${BATCH_NUM}"
+            cd "downloaded_batch_${BATCH_NUM}"
+            
+            LINK_NUM=1
+            while IFS= read -r LINK; do
+              if [ -n "$LINK" ]; then
+                echo "Downloading file $LINK_NUM of $LINK_COUNT"
+                wget --content-disposition --trust-server-names --max-redirect=5 "$LINK"
+                LINK_NUM=$((LINK_NUM + 1))
+              fi
+            done < "../$LINKS_FILE"
+            
+            # Send files for this batch
+            for FILE in *; do
+              if [ -f "$FILE" ] && [ -s "$FILE" ]; then
+                SIZE=$(stat -c%s "$FILE")
+                SIZE_MB=$((SIZE / 1024 / 1024))
+                curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
+                  -F "chat_id=${CHAT_ID}" \
+                  -F "document=@${FILE}" \
+                  -F "caption=${FILE} | ${SIZE_MB} MB"
+                sleep 1
+              fi
+            done
+            
+            cd ..
+            
+            # Clean up batch files
+            rm -rf "downloaded_batch_${BATCH_NUM}"
+            rm -f "thumbnail_${BATCH_NUM}.jpg"
+            
+            sleep 2
           done
           
-          cd ..
-          
-          SENT_COUNT=$((FILE_NUM - 1))
-          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
-            -d "chat_id=${CHAT_ID}" \
-            -d "text=✅ Done! Sent ${SENT_COUNT} file(s) from ${LINK_COUNT} link(s)."
+          # Send completion message
+          if [ "$TOTAL_BATCHES" -gt 1 ]; then
+            curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+              -d "chat_id=${CHAT_ID}" \
+              -d "text=✅ *Complete!*%0A%0A📋 Successfully sent ${TOTAL_BATCHES} batches" \
+              -d "parse_mode=Markdown"
+          fi
 
       - name: Show summary
         run: |
@@ -457,25 +424,11 @@ jobs:
           echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Source | ${{ env.SOURCE }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Links found | ${{ env.LINK_COUNT }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Total batches | ${{ env.TOTAL_BATCHES }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Thumbnail mode | ${{ env.INCLUDE_THUMBNAIL }} |" >> $GITHUB_STEP_SUMMARY
-          if [ -n "${{ env.VIDEO_TITLE }}" ]; then
-            echo "| Video title | ${{ env.VIDEO_TITLE }} |" >> $GITHUB_STEP_SUMMARY
-          fi
-          if [ -f "download_status.txt" ]; then
-            SUCCESS_COUNT=$(grep -c ":SUCCESS:" download_status.txt || echo "0")
-            FAILED_COUNT=$(grep -c ":FAILED:" download_status.txt || echo "0")
-            echo "| Successfully downloaded | $SUCCESS_COUNT |" >> $GITHUB_STEP_SUMMARY
-            echo "| Failed downloads | $FAILED_COUNT |" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Processed links:" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat extracted_links.txt >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Cleanup
         run: |
-          rm -f README*.md download_status.txt extracted_links.txt all_extracted_links.txt readme_files_list.txt input_text.txt thumbnail.jpg
-          rm -rf downloaded_files
+          rm -f README*.md batch_info.txt links_batch_*.txt thumbnail_*.jpg
+          rm -rf downloaded_batch_*
           echo "🧹 Cleaned up temporary files"
