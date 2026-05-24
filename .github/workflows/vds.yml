@@ -41,41 +41,59 @@ on:
 
 jobs:
   # ============================================
-  # JOB 1: Download YouTube videos/playlists and create READMEs
+  # JOB 1: Split URLs into array
   # ============================================
-  download-and-release:
+  prepare-urls:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    outputs:
+      url_matrix: ${{ steps.set-matrix.outputs.url_matrix }}
+      url_count: ${{ steps.set-matrix.outputs.url_count }}
+    steps:
+      - name: Split URLs into matrix
+        id: set-matrix
+        run: |
+          URLS="${{ inputs.youtube_urls }}"
+          # Split by comma and create JSON array
+          IFS=',' read -ra URL_ARRAY <<< "$URLS"
+          URL_COUNT=${#URL_ARRAY[@]}
+          
+          # Build JSON array for matrix
+          JSON_ARRAY="["
+          for i in "${!URL_ARRAY[@]}"; do
+            # Trim whitespace
+            URL=$(echo "${URL_ARRAY[$i]}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            JSON_ARRAY="${JSON_ARRAY}\"${URL}\""
+            if [ $i -lt $((URL_COUNT - 1)) ]; then
+              JSON_ARRAY="${JSON_ARRAY},"
+            fi
+          done
+          JSON_ARRAY="${JSON_ARRAY}]"
+          
+          echo "url_matrix=$JSON_ARRAY" >> $GITHUB_OUTPUT
+          echo "url_count=$URL_COUNT" >> $GITHUB_OUTPUT
+          echo "Found $URL_COUNT URL(s) to process"
 
+  # ============================================
+  # JOB 2: Process each URL in parallel
+  # ============================================
+  process-urls:
+    runs-on: ubuntu-latest
+    needs: prepare-urls
+    strategy:
+      fail-fast: false
+      matrix:
+        url: ${{ fromJSON(needs.prepare-urls.outputs.url_matrix) }}
     steps:
       - name: Mask sensitive inputs
         run: |
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
-          echo "✅ Sensitive inputs masked"
 
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           persist-credentials: true
           fetch-depth: 0
-
-      - name: Prepare videos branch
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git fetch origin
-
-          if git ls-remote --exit-code --heads origin videos; then
-            git checkout videos
-            git pull origin videos
-          else
-            git checkout --orphan videos
-            git rm -rf . || true
-            git commit --allow-empty -m "[bot] Initialize videos branch"
-            git push --set-upstream origin videos
-          fi
 
       - name: Setup FFmpeg
         run: |
@@ -134,44 +152,13 @@ jobs:
           echo "$DENO_INSTALL/bin" >> $GITHUB_PATH
           deno --version
 
-      # ============================================
-      # Split URLs into individual files
-      # ============================================
-      - name: Split URLs
-        id: split_urls
+      - name: Process URL
+        env:
+          CURRENT_URL: ${{ matrix.url }}
         run: |
-          echo "${{ inputs.youtube_urls }}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' > urls_list.txt
-          URL_COUNT=$(wc -l < urls_list.txt)
-          echo "URL_COUNT=$URL_COUNT" >> $GITHUB_ENV
-          echo "Found $URL_COUNT URL(s) to process"
-          cat urls_list.txt
-
-      # ============================================
-      # Process each URL using matrix strategy
-      # ============================================
-      - name: Process URL ${{ matrix.url_index }}
-        if: always()
-        strategy:
-          fail-fast: false
-          matrix:
-            url_index: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        run: |
-          URL_INDEX=${{ matrix.url_index }}
-          TOTAL_URLS=${{ env.URL_COUNT }}
-          
-          if [ $URL_INDEX -ge $TOTAL_URLS ]; then
-            echo "URL index $URL_INDEX exceeds total URLs ($TOTAL_URLS), skipping"
-            exit 0
-          fi
-          
-          # Get the URL at this index
-          CURRENT_URL=$(sed -n "$((URL_INDEX + 1))p" urls_list.txt)
-          echo "Processing URL $((URL_INDEX + 1)) of $TOTAL_URLS: $CURRENT_URL"
-          
-          # Create a working directory for this URL
-          WORK_DIR="work_${URL_INDEX}"
-          mkdir -p "$WORK_DIR"
-          cd "$WORK_DIR"
+          echo "=========================================="
+          echo "Processing URL: $CURRENT_URL"
+          echo "=========================================="
           
           # ============================================
           # Check if URL is a playlist
@@ -239,15 +226,15 @@ jobs:
           cd ..
           
           # ============================================
-          # Calculate starting README number
+          # Get starting README number
           # ============================================
-          # We need to know how many READMEs already exist
-          cd ../..
+          cd ../..  # Go to repository root
           EXISTING_README_COUNT=$(ls README*.md 2>/dev/null | wc -l)
-          cd "$WORK_DIR"
-          
           START_README_NUM=$((EXISTING_README_COUNT + 1))
           echo "Starting README number: $START_README_NUM"
+          
+          # Go back to work directory
+          cd -
           
           # ============================================
           # Process each video
@@ -304,20 +291,15 @@ jobs:
               touch "thumbnails_temp/${CURRENT_README_NUM}_${SAFE_NAME}/thumbnail.jpg"
             fi
             
-            # Find the video file in tmpvideos
+            # Find the video file
             cd tmpvideos
             VIDEO_FILE=""
             for f in *.mp4 *.mkv *.webm *.mp3 *.m4a; do
-              if [ -f "$f" ] && [[ "$f" == *"$VIDEO_TITLE"* ]]; then
+              if [ -f "$f" ]; then
                 VIDEO_FILE="$f"
                 break
               fi
             done
-            
-            if [ -z "$VIDEO_FILE" ]; then
-              # Try to find by index
-              VIDEO_FILE=$(ls -1 *.mp4 *.mkv *.webm *.mp3 *.m4a 2>/dev/null | sed -n "${VIDEO_INDEX}p")
-            fi
             
             if [ -z "$VIDEO_FILE" ]; then
               echo "Could not find video file for $VIDEO_TITLE"
@@ -383,10 +365,10 @@ jobs:
               echo "- [Download $filename]($url)" >> "$README_NAME"
             done
             
-            # Save to master video info
-            echo "${VIDEO_TITLE}|${README_NAME}|${VIDEO_FOLDER}" >> video_info.txt
+            # Save to video info file for this URL
+            echo "${VIDEO_TITLE}|${README_NAME}|${VIDEO_FOLDER}" >> video_info_${CURRENT_README_NUM}.txt
             
-            cd "$WORK_DIR/tmpvideos"
+            cd tmpvideos
             
             VIDEO_INDEX=$((VIDEO_INDEX + 1))
             CURRENT_README_NUM=$((CURRENT_README_NUM + 1))
@@ -394,31 +376,34 @@ jobs:
           
           cd ../..
           
-          # Commit files for this URL
-          echo "Committing files for URL $((URL_INDEX + 1))"
-          git add .
-          git commit -m "[bot] Add videos from URL $((URL_INDEX + 1))" || true
-          git push || true
-          
-          # Clean up
-          rm -rf "$WORK_DIR"
-          
-          echo "✅ Finished processing URL $((URL_INDEX + 1))"
+          echo "✅ Finished processing URL"
 
-      # ============================================
-      # Combine all video_info files
-      # ============================================
-      - name: Combine video info
+      - name: Commit and push changes
         run: |
-          if [ -f "video_info.txt" ]; then
-            echo "Combined video info already exists"
-          else
-            # Find all video_info.txt files from work directories
-            find . -name "video_info.txt" -exec cat {} \; > combined_video_info.txt 2>/dev/null || true
-            if [ -f "combined_video_info.txt" ]; then
-              mv combined_video_info.txt video_info.txt
-            fi
-          fi
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add .
+          git commit -m "[bot] Process URL: ${{ matrix.url }}" || true
+          git push || true
+
+  # ============================================
+  # JOB 3: Combine results and finalize
+  # ============================================
+  combine-results:
+    runs-on: ubuntu-latest
+    needs: [prepare-urls, process-urls]
+    if: always()
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Combine video info files
+        run: |
+          # Combine all video_info_*.txt files
+          cat video_info_*.txt 2>/dev/null | sort -u > video_info.txt
           
           if [ -f "video_info.txt" ]; then
             TOTAL_VIDEOS=$(wc -l < video_info.txt)
@@ -426,9 +411,6 @@ jobs:
             echo "Total videos processed: $TOTAL_VIDEOS"
           fi
 
-      # ============================================
-      # Batch commit zip parts (5 files per commit)
-      # ============================================
       - name: Batch commit zip parts
         run: |
           echo "Starting batch commits for all video folders"
@@ -442,7 +424,7 @@ jobs:
             if [[ "$VIDEO_FOLDER" == README* ]]; then
               continue
             fi
-            if [[ "$VIDEO_FOLDER" == work_* ]]; then
+            if [[ "$VIDEO_FOLDER" == thumbnails_temp* ]]; then
               continue
             fi
             
@@ -497,9 +479,6 @@ jobs:
             fi
           done
 
-      # ============================================
-      # Batch commit README files
-      # ============================================
       - name: Batch commit README files
         run: |
           echo "Committing README files in batches of 5"
@@ -515,10 +494,6 @@ jobs:
             echo "No README files to commit"
             exit 0
           fi
-          
-          # Sort README files naturally
-          IFS=$'\n' README_FILES=($(printf '%s\n' "${README_FILES[@]}" | sort -V))
-          unset IFS
           
           BATCH_SIZE=5
           BATCH_NUM=1
@@ -577,7 +552,7 @@ jobs:
           
           docker stop warp || true
 
-      - name: Upload playlist artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: playlist-info
@@ -586,15 +561,15 @@ jobs:
 
       - name: Cleanup temp folders
         run: |
-          rm -rf work_* thumbnails_temp tmpvideos
+          rm -rf thumbnails_temp tmpvideos
 
   # ============================================
-  # JOB 2: Send files to Bale bot
+  # JOB 4: Send files to Bale bot
   # ============================================
   send-to-bot:
     runs-on: ubuntu-latest
-    needs: download-and-release
-    if: always() && needs.download-and-release.result == 'success'
+    needs: combine-results
+    if: always() && needs.combine-results.result == 'success'
 
     steps:
       - name: Mask sensitive inputs
@@ -602,7 +577,7 @@ jobs:
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
 
-      - name: Download playlist artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           name: playlist-info
@@ -629,7 +604,6 @@ jobs:
           
           TOTAL_VIDEOS=$(wc -l < video_info.txt)
           
-          # Send initial message
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
             -d "text=🎬 *Download Started!*%0A%0A📋 Total videos: ${TOTAL_VIDEOS}%0A🎚️ Quality: ${QUALITY_DISPLAY}%0A%0A⬇️ Processing each video in order..." \
@@ -658,7 +632,6 @@ jobs:
               LINK_NUM=$((LINK_NUM + 1))
             done < ../extracted_links.txt
             
-            # Send thumbnail with caption
             if [ -f "../thumbnail_${VIDEO_NUM}.jpg" ] && [ -s "../thumbnail_${VIDEO_NUM}.jpg" ]; then
               CAPTION=$(printf "🎬 *%s*\n🎚️ Quality: %s\n\n📦 Found %s link(s)\n⬇️ Download complete!" "$video_title" "$QUALITY_DISPLAY" "$LINK_COUNT")
               curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendPhoto" \
@@ -674,7 +647,6 @@ jobs:
                 -d "parse_mode=Markdown"
             fi
             
-            # Send all file parts
             for FILE in *; do
               if [ -f "$FILE" ] && [ -s "$FILE" ]; then
                 SIZE=$(stat -c%s "$FILE")
