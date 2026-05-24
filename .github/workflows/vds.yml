@@ -140,10 +140,21 @@ jobs:
       - name: Parse URLs
         id: parse_urls
         run: |
-          echo "${{ inputs.youtube_urls }}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' > urls_list.txt
+          # Clean the input: remove spaces after commas, then split
+          INPUT="${{ inputs.youtube_urls }}"
+          # Remove all spaces first, then split by comma
+          CLEANED=$(echo "$INPUT" | tr -d ' ')
+          echo "$CLEANED" | tr ',' '\n' > urls_list.txt
+          
+          # Remove empty lines
+          sed -i '/^$/d' urls_list.txt
+          
           URL_COUNT=$(wc -l < urls_list.txt)
           echo "URL_COUNT=$URL_COUNT" >> $GITHUB_ENV
           echo "Found $URL_COUNT URL(s) to process"
+          
+          # Display URLs for debugging
+          cat urls_list.txt
           
           # Save each URL to individual variables
           for i in $(seq 1 5); do
@@ -151,6 +162,7 @@ jobs:
             if [ -n "$URL" ]; then
               echo "URL_$i=$URL" >> $GITHUB_ENV
               echo "URL_${i}_EXISTS=true" >> $GITHUB_ENV
+              echo "URL $i: $URL"
             else
               echo "URL_${i}_EXISTS=false" >> $GITHUB_ENV
             fi
