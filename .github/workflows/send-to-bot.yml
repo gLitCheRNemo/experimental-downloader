@@ -395,7 +395,7 @@ jobs:
                 curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendDocument" \
                   -F "chat_id=${CHAT_ID}" \
                   -F "document=@${FILE}" \
-                  -F "caption=${FILE} | ${SIZE_MB} MB"
+                  -F "caption=${FILE} | ${SIZE_MB}MB"
                 sleep 1
               fi
             done
