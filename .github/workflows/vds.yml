@@ -234,8 +234,7 @@ jobs:
           cd ..
 
       # ============================================
-      # PROCESS EACH VIDEO (split, thumbnail, folder)
-      # WITH BATCH COMMITS FOR ZIP PARTS (5 files per commit)
+      # PROCESS EACH VIDEO
       # ============================================
       - name: Process each video
         id: process
@@ -243,8 +242,12 @@ jobs:
           cd tmpvideos
           
           # Get list of video files
-          shopt -s nullglob
-          VIDEO_FILES=(*.mp4 *.mkv *.webm *.mp3 *.m4a 2>/dev/null)
+          VIDEO_FILES=()
+          for f in *.mp4 *.mkv *.webm *.mp3 *.m4a; do
+            if [ -f "$f" ]; then
+              VIDEO_FILES+=("$f")
+            fi
+          done
           
           if [ ${#VIDEO_FILES[@]} -eq 0 ]; then
             echo "❌ No video files found in tmpvideos!"
@@ -259,7 +262,7 @@ jobs:
           # Counter for README numbering
           README_NUM=1
           
-          # Create video_info file in the correct location
+          # Create video_info file
           > ../video_info.txt
           
           for VIDEO_FILE in "${VIDEO_FILES[@]}"; do
@@ -275,7 +278,7 @@ jobs:
             SAFE_NAME=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_' | sed 's/^_//;s/_$//')
             VIDEO_FOLDER="$SAFE_NAME"
             
-            # Create folder for this video (from the root, not inside tmpvideos)
+            # Create folder for this video
             mkdir -p "../$VIDEO_FOLDER"
             
             # Split the video file
@@ -287,20 +290,17 @@ jobs:
               exit 1
             fi
             
-            # Extract video ID using yt-dlp on the actual video file
-            echo "Extracting video ID..."
+            # Extract video ID
             VIDEO_ID=""
-            
-            # Try to get ID from the video file directly
-            VIDEO_ID=$(yt-dlp --get-id "file:./$VIDEO_FILE" 2>/dev/null || echo "")
-            
-            if [ -z "$VIDEO_ID" ] && [ "${{ env.IS_PLAYLIST }}" = "true" ]; then
-              echo "⚠️ Could not extract video ID from file, thumbnail may be missing"
+            if [ "${{ env.IS_PLAYLIST }}" = "false" ]; then
+              VIDEO_ID="${{ env.VIDEO_ID }}"
+            else
+              VIDEO_ID=$(yt-dlp --get-id "file:./$VIDEO_FILE" 2>/dev/null || echo "")
             fi
             
             echo "Video ID: ${VIDEO_ID:-'not found'}"
             
-            # Download thumbnail if we have a video ID
+            # Download thumbnail
             if [ -n "$VIDEO_ID" ]; then
               echo "Downloading thumbnail..."
               THUMBNAIL_DOWNLOADED=false
@@ -337,7 +337,7 @@ jobs:
               fi
             fi
             
-            # Generate README for this video (in the root directory)
+            # Generate README
             if [ $README_NUM -eq 1 ]; then
               README_NAME="README.md"
             else
@@ -355,7 +355,7 @@ Generated on: $(date)
 
 EOF
             
-            # Add links to files in this video's folder
+            # Add links to files
             for file in "../${VIDEO_FOLDER}"/*; do
               if [ -f "$file" ]; then
                 filename=$(basename "$file")
@@ -365,37 +365,43 @@ EOF
               fi
             done
             
-            # Save video info for tracking
+            # Save video info
             echo "${VIDEO_TITLE}|${VIDEO_ID}|${README_NAME}" >> ../video_info.txt
             
             README_NUM=$((README_NUM + 1))
           done
           
           cd ..
-          
-          # ============================================
-          # BATCH COMMIT: Commit zip parts in batches of 5 for each video folder
-          # ============================================
+
+      # ============================================
+      # BATCH COMMIT: Commit zip parts in batches of 5
+      # ============================================
+      - name: Batch commit zip parts
+        run: |
           echo "=========================================="
-          echo "Starting batch commits for all videos"
+          echo "Starting batch commits for all video folders"
           echo "=========================================="
           
-          # Process each video folder and commit its files in batches of 5
+          # Process each video folder
           for VIDEO_FOLDER in */; do
             VIDEO_FOLDER="${VIDEO_FOLDER%/}"
             
-            # Skip non-folder files and README files
+            # Skip README files and non-directories
             if [ ! -d "$VIDEO_FOLDER" ] || [[ "$VIDEO_FOLDER" == README* ]]; then
               continue
             fi
             
             echo "Processing folder: $VIDEO_FOLDER"
             
-            # Get list of files in this folder (the zip split parts)
+            # Get list of files in this folder
             cd "$VIDEO_FOLDER"
             
-            # Get all zip part files (sorted naturally)
-            FILES=(*.z[0-9]* *.zip 2>/dev/null)
+            FILES=()
+            for f in *.z[0-9]* *.zip; do
+              if [ -f "$f" ]; then
+                FILES+=("$f")
+              fi
+            done
             
             if [ ${#FILES[@]} -eq 0 ]; then
               echo "⚠️ No files found in $VIDEO_FOLDER"
@@ -415,12 +421,9 @@ EOF
               BATCH_FILES+=("$FILE")
               
               if [ ${#BATCH_FILES[@]} -ge $BATCH_SIZE ]; then
-                echo "Committing batch $BATCH_NUM for $VIDEO_FOLDER (${#BATCH_FILES[@]} files)"
+                echo "Committing batch $BATCH_NUM for $VIDEO_FOLDER"
                 cd ../..
                 git add "${VIDEO_FOLDER}/${BATCH_FILES[@]}"
-                cd "$VIDEO_FOLDER"
-                
-                cd ../..
                 git commit -m "[bot] Add ${VIDEO_FOLDER} batch $BATCH_NUM (${#BATCH_FILES[@]} files)"
                 git push
                 echo "✅ Batch $BATCH_NUM committed and pushed"
@@ -434,67 +437,80 @@ EOF
             
             # Commit remaining files
             if [ ${#BATCH_FILES[@]} -gt 0 ]; then
-              echo "Committing final batch for $VIDEO_FOLDER (${#BATCH_FILES[@]} files)"
+              echo "Committing final batch for $VIDEO_FOLDER"
               cd ../..
               git add "${VIDEO_FOLDER}/${BATCH_FILES[@]}"
-              cd "$VIDEO_FOLDER"
-              
-              cd ../..
               git commit -m "[bot] Add ${VIDEO_FOLDER} final batch (${#BATCH_FILES[@]} files)"
               git push
               echo "✅ Final batch committed and pushed"
               sleep 2
+              cd "$VIDEO_FOLDER"
             fi
             
             cd ..
           done
-          
-          # ============================================
-          # COMMIT README FILES (in batches of 5)
-          # ============================================
+
+      # ============================================
+      # BATCH COMMIT README FILES
+      # ============================================
+      - name: Batch commit README files
+        run: |
           echo "=========================================="
           echo "Committing README files in batches of 5"
           echo "=========================================="
           
           # Get all README files
-          README_FILES=(README*.md 2>/dev/null)
-          
-          if [ ${#README_FILES[@]} -gt 0 ]; then
-            BATCH_SIZE=5
-            BATCH_NUM=1
-            BATCH_README=()
-            
-            for README in "${README_FILES[@]}"; do
-              BATCH_README+=("$README")
-              
-              if [ ${#BATCH_README[@]} -ge $BATCH_SIZE ]; then
-                echo "Committing README batch $BATCH_NUM (${#BATCH_README[@]} files)"
-                git add "${BATCH_README[@]}"
-                git commit -m "[bot] Add READMEs batch $BATCH_NUM (${#BATCH_README[@]} files)"
-                git push
-                echo "✅ README batch $BATCH_NUM committed and pushed"
-                
-                BATCH_README=()
-                BATCH_NUM=$((BATCH_NUM + 1))
-                sleep 2
-              fi
-            done
-            
-            # Commit remaining READMEs
-            if [ ${#BATCH_README[@]} -gt 0 ]; then
-              echo "Committing final README batch (${#BATCH_README[@]} files)"
-              git add "${BATCH_README[@]}"
-              git commit -m "[bot] Add READMEs final batch (${#BATCH_README[@]} files)"
-              git push
-              echo "✅ Final README batch committed and pushed"
+          README_FILES=()
+          for f in README*.md; do
+            if [ -f "$f" ]; then
+              README_FILES+=("$f")
             fi
+          done
+          
+          if [ ${#README_FILES[@]} -eq 0 ]; then
+            echo "No README files to commit"
+            exit 0
           fi
           
-          # Create a master README that links to all video READMEs (only for playlists)
-          if [ "${{ env.IS_PLAYLIST }}" = "true" ] && [ "$TOTAL_VIDEOS" -gt 1 ]; then
+          BATCH_SIZE=5
+          BATCH_NUM=1
+          BATCH_README=()
+          
+          for README in "${README_FILES[@]}"; do
+            BATCH_README+=("$README")
+            
+            if [ ${#BATCH_README[@]} -ge $BATCH_SIZE ]; then
+              echo "Committing README batch $BATCH_NUM"
+              git add "${BATCH_README[@]}"
+              git commit -m "[bot] Add READMEs batch $BATCH_NUM (${#BATCH_README[@]} files)"
+              git push
+              echo "✅ README batch $BATCH_NUM committed and pushed"
+              
+              BATCH_README=()
+              BATCH_NUM=$((BATCH_NUM + 1))
+              sleep 2
+            fi
+          done
+          
+          # Commit remaining READMEs
+          if [ ${#BATCH_README[@]} -gt 0 ]; then
+            echo "Committing final README batch"
+            git add "${BATCH_README[@]}"
+            git commit -m "[bot] Add READMEs final batch (${#BATCH_README[@]} files)"
+            git push
+            echo "✅ Final README batch committed and pushed"
+          fi
+
+      # ============================================
+      # CREATE MASTER README FOR PLAYLISTS
+      # ============================================
+      - name: Create master README
+        if: env.IS_PLAYLIST == 'true'
+        run: |
+          if [ -f "video_info.txt" ] && [ "$(wc -l < video_info.txt)" -gt 1 ]; then
             echo "Creating master README..."
             
-            cat > MASTER_README.md << EOF
+            cat > MASTER_README.md << 'EOF'
 # 🎬 Playlist Download Complete
 
 Generated on: $(date)
@@ -518,16 +534,16 @@ EOF
             git push
           fi
           
-          # Pass video info to GITHUB_ENV
-          VIDEO_INFO_CONTENT=$(cat video_info.txt)
-          echo "VIDEO_INFO=$VIDEO_INFO_CONTENT" >> $GITHUB_ENV
-          echo "TOTAL_VIDEOS=$TOTAL_VIDEOS" >> $GITHUB_ENV
+          # Pass video info to GITHUB_ENV for job 2
+          if [ -f "video_info.txt" ]; then
+            TOTAL_VIDEOS=$(wc -l < video_info.txt)
+            echo "TOTAL_VIDEOS=$TOTAL_VIDEOS" >> $GITHUB_ENV
+          fi
           
-          # Stop WARP container
           docker stop warp || true
 
       # ============================================
-      # SINGLE VIDEO MODE: Save artifacts (backward compatible)
+      # SINGLE VIDEO MODE: Save artifacts
       # ============================================
       - name: Save single video artifacts
         if: env.IS_PLAYLIST == 'false'
@@ -585,7 +601,7 @@ EOF
           fi
 
       # ============================================
-      # SINGLE VIDEO MODE: Original send behavior
+      # SINGLE VIDEO MODE
       # ============================================
       - name: Download single video artifacts
         if: env.MODE == 'single'
@@ -680,7 +696,7 @@ EOF
             -d "text=✅ Done! Sent ${LINK_COUNT} file(s)."
 
       # ============================================
-      # PLAYLIST MODE: Process each video in order
+      # PLAYLIST MODE
       # ============================================
       - name: Download playlist artifacts
         if: env.MODE == 'playlist'
@@ -771,7 +787,7 @@ EOF
             
             cd ..
             
-            # Clean up for this video
+            # Clean up
             rm -rf "video_${VIDEO_NUM}" extracted_links.txt "thumbnail_${VIDEO_NUM}.jpg"
             
             VIDEO_NUM=$((VIDEO_NUM + 1))
