@@ -143,12 +143,10 @@ jobs:
           URL="${{ inputs.youtube_url }}"
           PLAYLIST_ITEMS="${{ inputs.playlist_items }}"
           
-          # Check if it's a playlist URL
           if [[ "$URL" == *"list="* ]] || [[ "$URL" == *"&list="* ]]; then
             echo "IS_PLAYLIST=true" >> $GITHUB_ENV
             echo "✅ Detected as playlist URL"
             
-            # Build playlist items option
             if [ -n "$PLAYLIST_ITEMS" ]; then
               ITEMS_OPTION="--playlist-items $PLAYLIST_ITEMS"
               echo "Using playlist items: $PLAYLIST_ITEMS"
@@ -157,16 +155,14 @@ jobs:
               echo "Downloading entire playlist"
             fi
             
-            # Extract video IDs and titles using flat-playlist (fast, no download)
             echo "Extracting video IDs and titles from playlist..."
-            yt-dlp --flat-playlist --print "%(id)s|%(title)s" $ITEMS_OPTION "$URL" > video_data.txt
+            yt-dlp --flat-playlist --print "%(id)s|%(playlist_index)04d|%(title)s" $ITEMS_OPTION "$URL" > video_data.txt
             
             VIDEO_COUNT=$(wc -l < video_data.txt)
             echo "VIDEO_COUNT=$VIDEO_COUNT" >> $GITHUB_ENV
             echo "Found $VIDEO_COUNT videos in playlist"
             
-            # Display extracted data for debugging
-            echo "Extracted video data:"
+            echo "Extracted video data (with playlist index):"
             cat video_data.txt
             
           else
@@ -174,7 +170,6 @@ jobs:
             echo "Single video URL detected"
           fi
           
-          # Save mode for Job 2
           echo "$IS_PLAYLIST" > mode.txt
 
       # ============================================
@@ -199,18 +194,19 @@ jobs:
           mkdir -p tmpvideos
           cd tmpvideos
           
+          # Use playlist index in filename for proper sorting
           if [ -n "$PLAYLIST_ITEMS" ]; then
             echo "Downloading playlist items: $PLAYLIST_ITEMS"
             yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" \
               $FORMAT_OPTS \
               --playlist-items "$PLAYLIST_ITEMS" \
-              --output "%(title)s.%(ext)s" \
+              --output "%(playlist_index)04d - %(title)s.%(ext)s" \
               "$URL"
           else
             echo "Downloading entire playlist"
             yt-dlp --remote-components ejs:github --proxy "socks5://127.0.0.1:1080" \
               $FORMAT_OPTS \
-              --output "%(title)s.%(ext)s" \
+              --output "%(playlist_index)04d - %(title)s.%(ext)s" \
               "$URL"
           fi
           
@@ -243,12 +239,11 @@ jobs:
           
           cd ..
           
-          # For single video, we still need to create a simple video data file
           cd tmpvideos
           for f in *.mp4 *.mkv *.webm *.mp3 *.m4a; do
             if [ -f "$f" ]; then
               TITLE="${f%.*}"
-              echo "|${TITLE}" > ../video_data.txt
+              echo "|0001|${TITLE}" > ../video_data.txt
               break
             fi
           done
@@ -270,58 +265,53 @@ jobs:
           echo "Downloading thumbnails using extracted video IDs"
           echo "=========================================="
           
-          # Create directory for thumbnails (they will be moved to video folders later)
           mkdir -p thumbnails_temp
           
           VIDEO_NUM=1
-          while IFS='|' read -r VIDEO_ID VIDEO_TITLE; do
-            # Skip empty lines
+          while IFS='|' read -r VIDEO_ID PLAYLIST_IDX VIDEO_TITLE; do
             if [ -z "$VIDEO_ID" ]; then
               continue
             fi
             
-            echo "Processing video $VIDEO_NUM: $VIDEO_TITLE (ID: $VIDEO_ID)"
+            echo "Processing video $VIDEO_NUM: $VIDEO_TITLE (ID: $VIDEO_ID, Index: $PLAYLIST_IDX)"
             
-            # Create safe folder name from title
             SAFE_NAME=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_' | sed 's/^_//;s/_$//')
             if [ -z "$SAFE_NAME" ]; then
               SAFE_NAME="video_$VIDEO_NUM"
             fi
             
-            # Create video folder
+            # Prepend playlist index for proper sorting
+            SAFE_NAME="${PLAYLIST_IDX}_${SAFE_NAME}"
+            
             mkdir -p "thumbnails_temp/$SAFE_NAME"
             
-            # Download thumbnail using direct URL method
             THUMBNAIL_DOWNLOADED=false
             
-            # Try maxresdefault.jpg (best quality)
             if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/maxresdefault.jpg" -O "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" 2>/dev/null; then
               if [ -f "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" ] && [ $(stat -c%s "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg") -gt 10000 ]; then
                 THUMBNAIL_DOWNLOADED=true
-                echo "  ✅ Downloaded maxresdefault.jpg for $VIDEO_TITLE"
+                echo "  ✅ Downloaded maxresdefault.jpg"
               else
                 rm -f "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg"
               fi
             fi
             
-            # Try sddefault.jpg
             if [ "$THUMBNAIL_DOWNLOADED" = false ]; then
               if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/sddefault.jpg" -O "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" 2>/dev/null; then
                 if [ -f "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" ] && [ $(stat -c%s "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg") -gt 5000 ]; then
                   THUMBNAIL_DOWNLOADED=true
-                  echo "  ✅ Downloaded sddefault.jpg for $VIDEO_TITLE"
+                  echo "  ✅ Downloaded sddefault.jpg"
                 else
                   rm -f "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg"
                 fi
               fi
             fi
             
-            # Try hqdefault.jpg
             if [ "$THUMBNAIL_DOWNLOADED" = false ]; then
               if wget -q --timeout=10 "https://img.youtube.com/vi/${VIDEO_ID}/hqdefault.jpg" -O "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" 2>/dev/null; then
                 if [ -f "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg" ] && [ $(stat -c%s "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg") -gt 2000 ]; then
                   THUMBNAIL_DOWNLOADED=true
-                  echo "  ✅ Downloaded hqdefault.jpg for $VIDEO_TITLE"
+                  echo "  ✅ Downloaded hqdefault.jpg"
                 else
                   rm -f "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg"
                 fi
@@ -329,12 +319,10 @@ jobs:
             fi
             
             if [ "$THUMBNAIL_DOWNLOADED" = false ]; then
-              echo "  ⚠️ Could not download thumbnail for $VIDEO_TITLE"
-              # Create empty placeholder so we don't fail
+              echo "  ⚠️ Could not download thumbnail"
               touch "thumbnails_temp/${SAFE_NAME}/thumbnail.jpg"
             fi
             
-            # Save mapping for later
             echo "${SAFE_NAME}|${VIDEO_TITLE}|${VIDEO_ID}" >> video_folder_map.txt
             
             VIDEO_NUM=$((VIDEO_NUM + 1))
@@ -350,13 +338,11 @@ jobs:
         run: |
           cd tmpvideos
           
-          # Get list of video files
+          # Get list of video files and sort numerically by the playlist index prefix
           VIDEO_FILES=()
-          for f in *.mp4 *.mkv *.webm *.mp3 *.m4a; do
-            if [ -f "$f" ]; then
-              VIDEO_FILES+=("$f")
-            fi
-          done
+          
+          # Use version sort which handles numbers naturally
+          VIDEO_FILES=($(ls -1 *.mp4 *.mkv *.webm *.mp3 *.m4a 2>/dev/null | sort -V))
           
           if [ ${#VIDEO_FILES[@]} -eq 0 ]; then
             echo "No video files found in tmpvideos!"
@@ -368,6 +354,11 @@ jobs:
           echo "TOTAL_VIDEOS=$TOTAL_VIDEOS" >> $GITHUB_ENV
           echo "Found $TOTAL_VIDEOS video(s) to process"
           
+          echo "Sorted video order (using version sort):"
+          for i in "${!VIDEO_FILES[@]}"; do
+            echo "  $((i+1)). ${VIDEO_FILES[$i]}"
+          done
+          
           README_NUM=1
           > ../video_info.txt
           
@@ -376,11 +367,28 @@ jobs:
             echo "Processing: $VIDEO_FILE"
             echo "=========================================="
             
-            VIDEO_TITLE="${VIDEO_FILE%.*}"
+            # Extract the playlist index if present (format: "0001 - title.mp4")
+            PLAYLIST_IDX=""
+            if [[ "$VIDEO_FILE" =~ ^([0-9]+)[[:space:]]*- ]]; then
+              PLAYLIST_IDX="${BASH_REMATCH[1]}"
+              # Remove the index prefix for the title
+              VIDEO_TITLE="${VIDEO_FILE#* - }"
+              VIDEO_TITLE="${VIDEO_TITLE%.*}"
+            else
+              VIDEO_TITLE="${VIDEO_FILE%.*}"
+            fi
+            
             echo "Video title: $VIDEO_TITLE"
+            echo "Playlist index: ${PLAYLIST_IDX:-'none'}"
             
             SAFE_NAME=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_' | sed 's/^_//;s/_$//')
-            VIDEO_FOLDER="$SAFE_NAME"
+            
+            # Prepend playlist index for proper sorting if available
+            if [ -n "$PLAYLIST_IDX" ]; then
+              VIDEO_FOLDER="${PLAYLIST_IDX}_${SAFE_NAME}"
+            else
+              VIDEO_FOLDER="$SAFE_NAME"
+            fi
             
             mkdir -p "../$VIDEO_FOLDER"
             
@@ -392,11 +400,16 @@ jobs:
               exit 1
             fi
             
-            # Move thumbnail from temp folder if it exists
-            if [ -f "../thumbnails_temp/${VIDEO_FOLDER}/thumbnail.jpg" ]; then
-              mv "../thumbnails_temp/${VIDEO_FOLDER}/thumbnail.jpg" "../${VIDEO_FOLDER}/thumbnail.jpg"
-              echo "✅ Moved thumbnail to ${VIDEO_FOLDER}/thumbnail.jpg"
-            fi
+            # Find matching thumbnail in thumbnails_temp
+            for thumb_dir in ../thumbnails_temp/*; do
+              if [ -d "$thumb_dir" ] && [[ "$thumb_dir" == *"${VIDEO_TITLE}"* ]] || [[ "$thumb_dir" == *"${SAFE_NAME}"* ]]; then
+                if [ -f "$thumb_dir/thumbnail.jpg" ]; then
+                  mv "$thumb_dir/thumbnail.jpg" "../${VIDEO_FOLDER}/thumbnail.jpg"
+                  echo "✅ Moved thumbnail to ${VIDEO_FOLDER}/thumbnail.jpg"
+                  break
+                fi
+              fi
+            done
             
             # Generate README
             if [ $README_NUM -eq 1 ]; then
@@ -424,24 +437,30 @@ jobs:
               echo "✅ Added thumbnail link to README"
             fi
             
-            # Add links to split zip files
+            # Add links to split zip files - SORTED NUMERICALLY
+            # This fixes the .z10 after .z99 issue
+            ZIP_FILES=()
             for file in "../${VIDEO_FOLDER}"/*.z[0-9]* "../${VIDEO_FOLDER}"/*.zip; do
               if [ -f "$file" ]; then
-                filename=$(basename "$file")
-                encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
-                url="https://github.com/${{ github.repository }}/raw/videos/${VIDEO_FOLDER}/$encoded_filename"
-                echo "- [Download $filename]($url)" >> "../$README_NAME"
+                ZIP_FILES+=("$(basename "$file")")
               fi
             done
             
-            # Get video ID from the video file (for single video mode)
+            # Sort zip files using version sort (handles .z2, .z10, .z100 correctly)
+            IFS=$'\n' ZIP_FILES=($(sort -V <<<"${ZIP_FILES[*]}"))
+            unset IFS
+            
+            for filename in "${ZIP_FILES[@]}"; do
+              encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$filename")
+              url="https://github.com/${{ github.repository }}/raw/videos/${VIDEO_FOLDER}/$encoded_filename"
+              echo "- [Download $filename]($url)" >> "../$README_NAME"
+            done
+            
+            # Get video ID
             VIDEO_ID=""
             if [ "$IS_PLAYLIST" = "false" ]; then
               VIDEO_URL="${{ inputs.youtube_url }}"
               VIDEO_ID=$(echo "$VIDEO_URL" | grep -oP '(?<=v=)[^&]+|(?<=youtu\.be/)[^?]+|(?<=embed/)[^?]+|(?<=shorts/)[^?]+' | head -1)
-            else
-              # Try to extract from folder map or filename
-              VIDEO_ID=$(yt-dlp --get-id "file:./$VIDEO_FILE" 2>/dev/null || echo "")
             fi
             
             echo "${VIDEO_TITLE}|${VIDEO_ID}|${README_NAME}" >> ../video_info.txt
@@ -458,9 +477,10 @@ jobs:
         run: |
           echo "Starting batch commits for all video folders"
           
+          # Sort video folders numerically by their prefix (using version sort)
+          VIDEO_FOLDERS=()
           for VIDEO_FOLDER in */; do
             VIDEO_FOLDER="${VIDEO_FOLDER%/}"
-            
             if [ ! -d "$VIDEO_FOLDER" ]; then
               continue
             fi
@@ -470,7 +490,14 @@ jobs:
             if [[ "$VIDEO_FOLDER" == thumbnails_temp* ]]; then
               continue
             fi
-            
+            VIDEO_FOLDERS+=("$VIDEO_FOLDER")
+          done
+          
+          # Sort folders using version sort
+          IFS=$'\n' VIDEO_FOLDERS=($(sort -V <<<"${VIDEO_FOLDERS[*]}"))
+          unset IFS
+          
+          for VIDEO_FOLDER in "${VIDEO_FOLDERS[@]}"; do
             echo "Processing folder: $VIDEO_FOLDER"
             
             FILES=()
@@ -480,7 +507,12 @@ jobs:
               fi
             done
             
-            # Also add thumbnail if it exists (as a separate batch or with zip parts)
+            # Sort files using version sort for correct numerical order
+            if [ ${#FILES[@]} -gt 0 ]; then
+              IFS=$'\n' FILES=($(sort -V <<<"${FILES[*]}"))
+              unset IFS
+            fi
+            
             if [ -f "$VIDEO_FOLDER/thumbnail.jpg" ]; then
               FILES+=("$VIDEO_FOLDER/thumbnail.jpg")
             fi
@@ -541,6 +573,10 @@ jobs:
             echo "No README files to commit"
             exit 0
           fi
+          
+          # Sort README files naturally (README.md, README2.md, README10.md, etc.)
+          IFS=$'\n' README_FILES=($(sort -V <<<"${README_FILES[*]}"))
+          unset IFS
           
           BATCH_SIZE=5
           BATCH_NUM=1
@@ -702,7 +738,7 @@ jobs:
           fi
 
       # ============================================
-      # SINGLE VIDEO MODE (unchanged)
+      # SINGLE VIDEO MODE
       # ============================================
       - name: Download single video artifacts
         if: env.MODE == 'single'
@@ -731,7 +767,7 @@ jobs:
           
           curl -L -o "$README_FILE" "$README_URL"
           
-          grep -oE 'https://[^ )]+\.(z[0-9]+|zip)' "$README_FILE" > extracted_links.txt
+          grep -oE 'https://[^ )]+\.(z[0-9]+|zip)' "$README_FILE" | sort -V > extracted_links.txt
           
           LINK_COUNT=$(wc -l < extracted_links.txt)
           echo "LINK_COUNT=$LINK_COUNT" >> $GITHUB_ENV
@@ -794,7 +830,7 @@ jobs:
             -d "text=✅ Done! Sent ${LINK_COUNT} file(s)."
 
       # ============================================
-      # PLAYLIST MODE (modified: consolidated messaging)
+      # PLAYLIST MODE
       # ============================================
       - name: Download playlist artifacts
         if: env.MODE == 'playlist'
@@ -827,7 +863,8 @@ jobs:
             README_URL="https://raw.githubusercontent.com/${{ github.repository }}/videos/${readme_name}"
             curl -L -o "$readme_name" "$README_URL"
             
-            grep -oE 'https://[^ )]+\.(z[0-9]+|zip)' "$readme_name" > extracted_links.txt
+            # Extract and sort links numerically
+            grep -oE 'https://[^ )]+\.(z[0-9]+|zip)' "$readme_name" | sort -V > extracted_links.txt
             LINK_COUNT=$(wc -l < extracted_links.txt)
             
             SAFE_NAME=$(echo "$video_title" | sed 's/[^a-zA-Z0-9]/_/g' | tr -s '_' | sed 's/^_//;s/_$//')
@@ -844,7 +881,6 @@ jobs:
               LINK_NUM=$((LINK_NUM + 1))
             done < ../extracted_links.txt
             
-            # Send thumbnail with caption (includes video number, no separate message)
             if [ -f "../thumbnail_${VIDEO_NUM}.jpg" ] && [ -s "../thumbnail_${VIDEO_NUM}.jpg" ]; then
               CAPTION=$(printf "🎬 *%s*\n🎚️ Quality: %s\n\n📋 Video %s of %s\n📦 Found %s link(s)\n⬇️ Download complete!" "$video_title" "$QUALITY_DISPLAY" "$VIDEO_NUM" "$TOTAL_VIDEOS" "$LINK_COUNT")
               curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendPhoto" \
@@ -853,7 +889,6 @@ jobs:
                 -F "caption=${CAPTION}" \
                 -F "parse_mode=Markdown"
             else
-              # Fallback if no thumbnail - send text message with same info
               TEXT_MSG=$(printf "🎬 *%s*\n🎚️ Quality: %s\n\n📋 Video %s of %s\n📦 Found %s link(s)\n⬇️ Download complete!" "$video_title" "$QUALITY_DISPLAY" "$VIDEO_NUM" "$TOTAL_VIDEOS" "$LINK_COUNT")
               curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
                 -d "chat_id=${CHAT_ID}" \
@@ -861,7 +896,7 @@ jobs:
                 -d "parse_mode=Markdown"
             fi
             
-            # Send all file parts
+            # Send files in sorted order
             for FILE in *; do
               if [ -f "$FILE" ] && [ -s "$FILE" ]; then
                 SIZE=$(stat -c%s "$FILE")
