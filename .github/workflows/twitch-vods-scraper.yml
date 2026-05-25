@@ -34,8 +34,9 @@ jobs:
         run: |
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
+          echo "✅ Sensitive inputs masked"
 
-      - name: Install dependencies
+      - name: Install dependencies with Stealth Plugin
         run: |
           sudo apt-get update
           sudo apt-get install -y wget gnupg
@@ -46,13 +47,17 @@ jobs:
           mkdir -p scraper
           cd scraper
           npm init -y
-          npm install puppeteer
+          npm install puppeteer-extra puppeteer-extra-plugin-stealth puppeteer
 
-      - name: Create scraper script
+      - name: Create scraper script with Stealth Plugin
         run: |
           cat > scraper/index.js << 'EOF'
-          const puppeteer = require('puppeteer');
+          const puppeteer = require('puppeteer-extra');
+          const StealthPlugin = require('puppeteer-extra-plugin-stealth');
           const fs = require('fs');
+          
+          // Apply stealth plugin to evade detection
+          puppeteer.use(StealthPlugin());
 
           function expandRange(rangeStr, maxValue) {
             var result = [];
@@ -82,15 +87,24 @@ jobs:
           (async function() {
             var browser = null;
             try {
-              console.log('Launching Chrome...');
+              console.log('🚀 Launching Chrome with Stealth Plugin...');
               browser = await puppeteer.launch({
                 executablePath: '/usr/bin/google-chrome-stable',
-                args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+                args: [
+                  '--no-sandbox',
+                  '--disable-setuid-sandbox',
+                  '--disable-dev-shm-usage',
+                  '--disable-blink-features=AutomationControlled',
+                  '--disable-features=IsolateOrigins,site-per-process'
+                ],
                 headless: 'new'
               });
 
               var page = await browser.newPage();
               await page.setViewport({ width: 1920, height: 1080 });
+              
+              // Set realistic user agent
+              await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
               var channelUrl = process.env.CHANNEL_URL;
               channelUrl = channelUrl.replace(/\/$/, '');
@@ -99,25 +113,27 @@ jobs:
                 videosUrl = channelUrl + '/videos';
               }
 
-              console.log('Navigating to: ' + videosUrl);
+              console.log('🌐 Navigating to: ' + videosUrl);
               await page.goto(videosUrl, { waitUntil: 'networkidle2', timeout: 60000 });
 
-              console.log('Waiting for page to load...');
+              console.log('⏳ Waiting for page to load...');
               await new Promise(function(r) { setTimeout(r, 5000); });
 
               var scrollCount = parseInt(process.env.SCROLL_COUNT, 10) || 3;
-              console.log('Scrolling ' + scrollCount + ' times...');
+              console.log('📜 Scrolling ' + scrollCount + ' times...');
               for (var s = 0; s < scrollCount; s++) {
                 await page.evaluate(function() { window.scrollBy(0, window.innerHeight); });
                 await new Promise(function(r) { setTimeout(r, 2000); });
               }
               await new Promise(function(r) { setTimeout(r, 3000); });
 
-              console.log('Extracting VOD links...');
+              console.log('🔍 Extracting VOD links...');
               var vods = [];
               var seenUrls = {};
 
               var cards = await page.$$('a[href*="/videos/"], a[href*="/v/"]');
+
+              console.log('Found ' + cards.length + ' candidate links');
 
               for (var c = 0; c < cards.length; c++) {
                 try {
@@ -130,55 +146,43 @@ jobs:
                   seenUrls[cleanUrl] = true;
 
                   var title = await page.evaluate(function(el) {
-                    var t = el.querySelector('[data-test-selector="video-card-title"], .tw-title, h3');
-                    if (t) return t.textContent.trim();
-                    var h = el.querySelector('h2, h3, h4');
-                    if (h) return h.textContent.trim();
+                    var card = el.closest('[data-test-selector="video-card"], .tw-card, article');
+                    if (card) {
+                      var t = card.querySelector('[data-test-selector="video-card-title"], .tw-title, h3, h4');
+                      if (t) return t.textContent.trim();
+                    }
                     return 'Untitled';
                   }, cards[c]);
 
                   vods.push({ url: cleanUrl, title: title || 'Untitled' });
-                  console.log('Found: ' + title);
+                  console.log('  ✅ Found: ' + title);
                 } catch(e) {
-                  console.log('Error processing card: ' + e.message);
+                  console.log('  ⚠️ Error processing card: ' + e.message);
                 }
               }
 
+              console.log('📊 Total VODs found: ' + vods.length);
+              
               if (vods.length === 0) {
-                console.log('No VODs found with first method, trying fallback...');
-                var moreVods = await page.evaluate(function() {
-                  var results = [];
-                  var links = document.querySelectorAll('a[href*="/videos/"], a[href*="/v/"]');
-                  var seen = {};
-                  for (var i = 0; i < links.length; i++) {
-                    var href = links[i].getAttribute('href');
-                    if (!href) continue;
-                    if (href.indexOf('/') === 0) href = 'https://www.twitch.tv' + href;
-                    var clean = href.split('?')[0];
-                    if (clean.indexOf('/videos/') === -1 && clean.indexOf('/v/') === -1) continue;
-                    if (seen[clean]) continue;
-                    seen[clean] = true;
-                    var title = 'Untitled';
-                    var parent = links[i].closest('[data-test-selector="video-card"], .tw-card');
-                    if (parent) {
-                      var titleEl = parent.querySelector('[data-test-selector="video-card-title"], .tw-title, h3');
-                      if (titleEl) title = titleEl.textContent.trim();
+                console.log('No VODs found with link method, trying regex fallback...');
+                var pageContent = await page.content();
+                var matches = pageContent.match(/https:\/\/www\.twitch\.tv\/videos\/\d+/g);
+                if (matches) {
+                  var uniqueMatches = {};
+                  for (var m = 0; m < matches.length; m++) {
+                    if (!uniqueMatches[matches[m]]) {
+                      uniqueMatches[matches[m]] = true;
+                      vods.push({ url: matches[m], title: 'VOD ' + (Object.keys(uniqueMatches).length) });
                     }
-                    results.push({ url: clean, title: title });
                   }
-                  return results;
-                });
-                for (var v = 0; v < moreVods.length; v++) {
-                  if (!seenUrls[moreVods[v].url]) {
-                    seenUrls[moreVods[v].url] = true;
-                    vods.push(moreVods[v]);
-                  }
+                  console.log('Found ' + vods.length + ' VODs via regex');
                 }
               }
 
-              console.log('Total VODs found: ' + vods.length);
               if (vods.length === 0) {
-                console.error('No VODs found');
+                console.error('❌ No VODs found');
+                await page.screenshot({ path: '/tmp/debug.png' });
+                console.log('📸 Screenshot saved to /tmp/debug.png');
                 process.exit(1);
               }
 
@@ -191,7 +195,7 @@ jobs:
                 if (idx >= 1 && idx <= vods.length) selected.push(vods[idx - 1]);
               }
 
-              console.log('Selected ' + selected.length + ' VODs');
+              console.log('✅ Selected ' + selected.length + ' VODs');
 
               var output = '';
               var links = '';
@@ -208,10 +212,10 @@ jobs:
               var channelName = channelParts[channelParts.length - 1];
               fs.writeFileSync('/tmp/channel_name.txt', channelName);
 
-              console.log('Done!');
+              console.log('🎉 Done!');
               await browser.close();
             } catch(err) {
-              console.error('Error:', err.message);
+              console.error('❌ Error:', err.message);
               process.exit(1);
             } finally {
               if (browser) await browser.close();
@@ -227,6 +231,14 @@ jobs:
           export SCROLL_COUNT="${{ inputs.scroll_count }}"
           node index.js
 
+      - name: Upload debug screenshot
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshot
+          path: /tmp/debug.png
+          retention-days: 1
+
       - name: Save results
         run: |
           if [ -f /tmp/vod_links.txt ]; then
@@ -236,11 +248,15 @@ jobs:
             echo "CHANNEL_NAME=$(cat /tmp/channel_name.txt)" >> $GITHUB_ENV
             echo "✅ Results saved"
           else
-            echo "❌ No results found"
+            echo "❌ No results found - checking if debug screenshot exists"
+            if [ -f /tmp/debug.png ]; then
+              echo "Debug screenshot available in artifacts"
+            fi
             exit 1
           fi
 
       - name: Send to Bale
+        if: success()
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
@@ -248,10 +264,15 @@ jobs:
           COUNT="${{ env.LINK_COUNT }}"
           LIST="${{ env.VOD_FULL_LIST }}"
           
+          # Truncate if too long
+          if [ ${#LIST} -gt 3500 ]; then
+            LIST="${LIST:0:3500}..."
+          fi
+          
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
             -d "text=🎥 Twitch VODs Extracted!%0A%0A📺 Channel: ${CHANNEL}%0A📋 VODs found: ${COUNT}%0A%0A${LIST}%0A💡 Use these with your Video Downloader." \
             -d "parse_mode=Markdown"
 
       - name: Cleanup
-        run: rm -rf scraper /tmp/vod_*
+        run: rm -rf scraper /tmp/vod_* /tmp/debug.png
