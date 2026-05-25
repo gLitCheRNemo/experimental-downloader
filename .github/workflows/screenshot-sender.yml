@@ -79,17 +79,17 @@ jobs:
             git push --set-upstream origin screenshot
           fi
 
-      - name: Setup Puppeteer and FFmpeg
+      - name: Setup Puppeteer, FFmpeg, and Stealth Plugin
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
           mkdir -p capture_script
           cd capture_script
           npm init -y
-          npm install puppeteer puppeteer-screen-recorder
+          npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth puppeteer-screen-recorder
 
       # ============================================
-      # MODE 1: Record video (if record_seconds is provided)
+      # MODE 1: Record video (if record_seconds is provided) - TWITCH FIXED
       # ============================================
       - name: Record video
         id: record
@@ -103,46 +103,142 @@ jobs:
           
           cd capture_script
           node << 'EOF'
-          const puppeteer = require('puppeteer');
+          const puppeteer = require('puppeteer-extra');
+          const StealthPlugin = require('puppeteer-extra-plugin-stealth');
           const { PuppeteerScreenRecorder } = require('puppeteer-screen-recorder');
           const path = require('path');
           
+          // Apply stealth plugin to evade detection (especially for Twitch)
+          puppeteer.use(StealthPlugin());
+          
           (async () => {
-            const browser = await puppeteer.launch({
-              args: ['--no-sandbox', '--disable-setuid-sandbox'],
-              headless: 'new'
-            });
-            const page = await browser.newPage();
-            
-            await page.setViewport({ width: 1920, height: 1080 });
-            
-            const url = process.env.WEBSITE_URL;
-            const outputName = process.env.OUTPUT_NAME;
-            const recordSeconds = parseInt(process.env.RECORD_SECONDS, 10) || 30;
-            
-            console.log(`Navigating to: ${url}`);
-            console.log(`Recording duration: ${recordSeconds} seconds`);
-            
-            await page.goto(url, { waitUntil: 'networkidle2' });
-            
-            console.log('Waiting 5 seconds for initial page load...');
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            
-            const videoPath = path.join('..', 'screenshot', `${outputName}.mp4`);
-            
-            console.log(`Starting recording: ${videoPath}`);
-            const recorder = new PuppeteerScreenRecorder(page);
-            await recorder.start(videoPath);
-            
-            console.log(`Recording for ${recordSeconds} seconds...`);
-            await new Promise(resolve => setTimeout(resolve, recordSeconds * 1000));
-            
-            await recorder.stop();
-            console.log(`✅ Recording saved: ${outputName}.mp4`);
-            
-            await browser.close();
+            let browser;
+            try {
+              // Launch with anti-detection arguments
+              browser = await puppeteer.launch({
+                args: [
+                  '--no-sandbox',
+                  '--disable-setuid-sandbox',
+                  '--disable-blink-features=AutomationControlled',
+                  '--disable-features=IsolateOrigins,site-per-process',
+                  '--disable-web-security',
+                  '--disable-features=BlockInsecurePrivateNetworkRequests',
+                  '--disable-sync',
+                  '--disable-default-apps',
+                  '--disable-extensions',
+                  '--disable-component-extensions-with-background-pages',
+                  '--disable-background-networking',
+                  '--disable-background-timer-throttling',
+                  '--disable-backgrounding-occluded-windows',
+                  '--disable-breakpad',
+                  '--disable-client-side-phishing-detection',
+                  '--disable-component-update',
+                  '--disable-domain-reliability',
+                  '--disable-print-preview',
+                  '--disable-prompt-on-repost',
+                  '--disable-speech-api',
+                  '--disable-translate',
+                  '--disable-voice-input',
+                  '--disable-dev-shm-usage',
+                  '--hide-scrollbars',
+                  '--mute-audio',
+                  '--no-first-run',
+                  '--no-default-browser-check'
+                ],
+                headless: 'new'
+              });
+              
+              const page = await browser.newPage();
+              
+              // Set realistic user agent (Chrome on Windows)
+              await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+              
+              // Set viewport
+              await page.setViewport({ width: 1920, height: 1080 });
+              
+              // Additional stealth: override navigator.webdriver
+              await page.evaluateOnNewDocument(() => {
+                Object.defineProperty(navigator, 'webdriver', {
+                  get: () => undefined
+                });
+              });
+              
+              const url = process.env.WEBSITE_URL;
+              const outputName = process.env.OUTPUT_NAME;
+              const recordSeconds = parseInt(process.env.RECORD_SECONDS, 10) || 30;
+              
+              console.log(`Navigating to: ${url}`);
+              console.log(`Recording duration: ${recordSeconds} seconds`);
+              
+              // Navigate with longer timeout for Twitch
+              await page.goto(url, { 
+                waitUntil: 'networkidle2', 
+                timeout: 60000 
+              });
+              
+              // Check if it's Twitch
+              const isTwitch = url.includes('twitch.tv');
+              
+              if (isTwitch) {
+                console.log('Twitch detected - waiting for player to load...');
+                // Wait for video player with multiple selector attempts
+                const playerSelectors = [
+                  '.video-player__container',
+                  '.player-container',
+                  '[data-test-selector="video-player"]',
+                  '.tw-player',
+                  '.persistent-player'
+                ];
+                
+                let playerFound = false;
+                for (const selector of playerSelectors) {
+                  try {
+                    await page.waitForSelector(selector, { timeout: 15000 });
+                    console.log(`✅ Video player found with selector: ${selector}`);
+                    playerFound = true;
+                    break;
+                  } catch (e) {
+                    console.log(`Selector ${selector} not found, trying next...`);
+                  }
+                }
+                
+                if (!playerFound) {
+                  console.log('⚠️ Player selector not found, but continuing anyway...');
+                }
+                
+                // Extra wait for Twitch stream to start
+                console.log('Waiting additional 15 seconds for stream to buffer...');
+                await new Promise(resolve => setTimeout(resolve, 15000));
+              } else {
+                console.log('Waiting 5 seconds for initial page load...');
+                await new Promise(resolve => setTimeout(resolve, 5000));
+              }
+              
+              const videoPath = path.join('..', 'screenshot', `${outputName}.mp4`);
+              
+              console.log(`Starting recording: ${videoPath}`);
+              const recorder = new PuppeteerScreenRecorder(page, {
+                fps: 25,
+                recordDurationLimit: recordSeconds
+              });
+              await recorder.start(videoPath);
+              
+              console.log(`Recording for ${recordSeconds} seconds...`);
+              await new Promise(resolve => setTimeout(resolve, recordSeconds * 1000));
+              
+              await recorder.stop();
+              console.log(`✅ Recording saved: ${outputName}.mp4`);
+              
+            } catch (error) {
+              console.error('Error during recording:', error.message);
+              throw error;
+            } finally {
+              if (browser) {
+                await browser.close();
+              }
+            }
           })().catch(err => {
-            console.error('Error:', err);
+            console.error('Fatal error:', err);
             process.exit(1);
           });
           EOF
@@ -160,7 +256,7 @@ jobs:
           RECORD_SECONDS: ${{ inputs.record_seconds }}
 
       # ============================================
-      # MODE 2: Take screenshots (if record_seconds is empty)
+      # MODE 2: Take screenshots (if record_seconds is empty) - TWITCH FIXED
       # ============================================
       - name: Take screenshot(s)
         id: screenshot
@@ -176,69 +272,133 @@ jobs:
           
           cd capture_script
           node << 'EOF'
-          const puppeteer = require('puppeteer');
+          const puppeteer = require('puppeteer-extra');
+          const StealthPlugin = require('puppeteer-extra-plugin-stealth');
           const fs = require('fs');
           const path = require('path');
           
+          // Apply stealth plugin to evade detection
+          puppeteer.use(StealthPlugin());
+          
           (async () => {
-            const browser = await puppeteer.launch({
-              args: ['--no-sandbox', '--disable-setuid-sandbox'],
-              headless: 'new'
-            });
-            const page = await browser.newPage();
-            
-            await page.setViewport({ width: 1920, height: 1080 });
-            
-            const url = process.env.WEBSITE_URL;
-            const outputName = process.env.OUTPUT_NAME;
-            const fullPage = process.env.FULL_PAGE === 'true';
-            const screenshotCount = parseInt(process.env.SCREENSHOT_COUNT, 10) || 1;
-            const delaySeconds = parseInt(process.env.DELAY_SECONDS, 10) || 0;
-            
-            console.log(`Navigating to: ${url}`);
-            console.log(`Full-page mode: ${fullPage}`);
-            console.log(`Screenshots to take: ${screenshotCount}`);
-            console.log(`Delay between screenshots: ${delaySeconds}s`);
-            
-            await page.goto(url, { waitUntil: 'networkidle2' });
-            
-            console.log('Waiting 5 seconds for initial page load...');
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            
-            const screenshotDir = path.join('..', 'screenshot');
-            if (!fs.existsSync(screenshotDir)) {
-              fs.mkdirSync(screenshotDir, { recursive: true });
-            }
-            
-            for (let i = 1; i <= screenshotCount; i++) {
-              let filename;
-              if (screenshotCount === 1) {
-                filename = `${outputName}.png`;
+            let browser;
+            try {
+              browser = await puppeteer.launch({
+                args: [
+                  '--no-sandbox',
+                  '--disable-setuid-sandbox',
+                  '--disable-blink-features=AutomationControlled',
+                  '--disable-features=IsolateOrigins,site-per-process',
+                  '--disable-web-security',
+                  '--disable-dev-shm-usage',
+                  '--no-first-run',
+                  '--no-default-browser-check'
+                ],
+                headless: 'new'
+              });
+              
+              const page = await browser.newPage();
+              
+              // Set realistic user agent
+              await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+              
+              await page.setViewport({ width: 1920, height: 1080 });
+              
+              // Override webdriver property
+              await page.evaluateOnNewDocument(() => {
+                Object.defineProperty(navigator, 'webdriver', {
+                  get: () => undefined
+                });
+              });
+              
+              const url = process.env.WEBSITE_URL;
+              const outputName = process.env.OUTPUT_NAME;
+              const fullPage = process.env.FULL_PAGE === 'true';
+              const screenshotCount = parseInt(process.env.SCREENSHOT_COUNT, 10) || 1;
+              const delaySeconds = parseInt(process.env.DELAY_SECONDS, 10) || 0;
+              
+              console.log(`Navigating to: ${url}`);
+              console.log(`Full-page mode: ${fullPage}`);
+              console.log(`Screenshots to take: ${screenshotCount}`);
+              console.log(`Delay between screenshots: ${delaySeconds}s`);
+              
+              await page.goto(url, { 
+                waitUntil: 'networkidle2', 
+                timeout: 60000 
+              });
+              
+              // Check if it's Twitch
+              const isTwitch = url.includes('twitch.tv');
+              
+              if (isTwitch) {
+                console.log('Twitch detected - waiting for player to load...');
+                const playerSelectors = [
+                  '.video-player__container',
+                  '.player-container',
+                  '[data-test-selector="video-player"]',
+                  '.tw-player',
+                  '.persistent-player'
+                ];
+                
+                for (const selector of playerSelectors) {
+                  try {
+                    await page.waitForSelector(selector, { timeout: 15000 });
+                    console.log(`✅ Video player found with selector: ${selector}`);
+                    break;
+                  } catch (e) {
+                    // Continue to next selector
+                  }
+                }
+                
+                console.log('Waiting additional 10 seconds for stream to stabilize...');
+                await new Promise(resolve => setTimeout(resolve, 10000));
               } else {
-                filename = `${outputName}_${i}.png`;
-              }
-              const filePath = path.join(screenshotDir, filename);
-              
-              console.log(`Taking screenshot ${i}/${screenshotCount}: ${filename}`);
-              
-              if (fullPage) {
-                await page.screenshot({ path: filePath, fullPage: true });
-              } else {
-                await page.screenshot({ path: filePath, fullPage: false });
+                console.log('Waiting 5 seconds for initial page load...');
+                await new Promise(resolve => setTimeout(resolve, 5000));
               }
               
-              console.log(`  ✅ Saved: ${filename}`);
+              const screenshotDir = path.join('..', 'screenshot');
+              if (!fs.existsSync(screenshotDir)) {
+                fs.mkdirSync(screenshotDir, { recursive: true });
+              }
               
-              if (i < screenshotCount && delaySeconds > 0) {
-                console.log(`  ⏱️  Waiting ${delaySeconds} seconds...`);
-                await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
+              for (let i = 1; i <= screenshotCount; i++) {
+                let filename;
+                if (screenshotCount === 1) {
+                  filename = `${outputName}.png`;
+                } else {
+                  filename = `${outputName}_${i}.png`;
+                }
+                const filePath = path.join(screenshotDir, filename);
+                
+                console.log(`Taking screenshot ${i}/${screenshotCount}: ${filename}`);
+                
+                if (fullPage) {
+                  await page.screenshot({ path: filePath, fullPage: true });
+                } else {
+                  await page.screenshot({ path: filePath, fullPage: false });
+                }
+                
+                console.log(`  ✅ Saved: ${filename}`);
+                
+                if (i < screenshotCount && delaySeconds > 0) {
+                  console.log(`  ⏱️  Waiting ${delaySeconds} seconds...`);
+                  await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
+                }
+              }
+              
+              console.log(`\n✅ All ${screenshotCount} screenshot(s) completed!`);
+              
+            } catch (error) {
+              console.error('Error during screenshot capture:', error.message);
+              throw error;
+            } finally {
+              if (browser) {
+                await browser.close();
               }
             }
-            
-            console.log(`\n✅ All ${screenshotCount} screenshot(s) completed!`);
-            await browser.close();
           })().catch(err => {
-            console.error('Error:', err);
+            console.error('Fatal error:', err);
             process.exit(1);
           });
           EOF
