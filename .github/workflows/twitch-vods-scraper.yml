@@ -48,121 +48,209 @@ jobs:
           npm init -y
           npm install puppeteer
 
-      - name: Scrape VODs
+      - name: Create scraper script
         run: |
-          cd scraper
-          node -e "
+          cat > scraper/index.js << 'EOF'
           const puppeteer = require('puppeteer');
           const fs = require('fs');
 
-          (async () => {
-            const browser = await puppeteer.launch({
-              executablePath: '/usr/bin/google-chrome-stable',
-              args: ['--no-sandbox', '--disable-setuid-sandbox'],
-              headless: 'new'
-            });
-            const page = await browser.newPage();
-            
-            let url = process.env.CHANNEL_URL;
-            url = url.replace(/\/$/, '');
-            if (!url.endsWith('/videos')) url = url + '/videos';
-            
-            console.log('Navigating to:', url);
-            await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-            await new Promise(r => setTimeout(r, 5000));
-            
-            const scrolls = parseInt(process.env.SCROLL_COUNT) || 3;
-            for (let i = 0; i < scrolls; i++) {
-              await page.evaluate(() => window.scrollBy(0, window.innerHeight));
-              await new Promise(r => setTimeout(r, 2000));
-            }
-            await new Promise(r => setTimeout(r, 3000));
-            
-            const vods = await page.evaluate(() => {
-              const links = document.querySelectorAll('a[href*=\"/videos/\"], a[href*=\"/v/\"]');
-              const seen = {};
-              const results = [];
-              for (const link of links) {
-                let href = link.getAttribute('href');
-                if (!href) continue;
-                if (href.startsWith('/')) href = 'https://www.twitch.tv' + href;
-                const clean = href.split('?')[0];
-                if (!clean.includes('/videos/') && !clean.includes('/v/')) continue;
-                if (seen[clean]) continue;
-                seen[clean] = true;
-                let title = 'Untitled';
-                const card = link.closest('[data-test-selector=\"video-card\"], .tw-card');
-                if (card) {
-                  const titleEl = card.querySelector('[data-test-selector=\"video-card-title\"], .tw-title, h3');
-                  if (titleEl) title = titleEl.textContent.trim();
+          function expandRange(rangeStr, maxValue) {
+            var result = [];
+            var parts = rangeStr.split(',');
+            for (var p = 0; p < parts.length; p++) {
+              var part = parts[p].trim();
+              if (part.indexOf('-') !== -1) {
+                var rangeParts = part.split('-');
+                var start = parseInt(rangeParts[0], 10);
+                var end = parseInt(rangeParts[1], 10);
+                var min = Math.min(start, end);
+                var max = Math.max(start, end);
+                for (var i = min; i <= max && i <= maxValue; i++) {
+                  if (result.indexOf(i) === -1) result.push(i);
                 }
-                results.push({ url: clean, title: title });
-              }
-              return results;
-            });
-            
-            console.log('Found', vods.length, 'VODs');
-            if (vods.length === 0) process.exit(1);
-            
-            function expandRange(rangeStr, maxVal) {
-              const result = [];
-              const parts = rangeStr.split(',');
-              for (const part of parts) {
-                const p = part.trim();
-                if (p.includes('-')) {
-                  const [start, end] = p.split('-').map(Number);
-                  const min = Math.min(start, end);
-                  const max = Math.max(start, end);
-                  for (let i = min; i <= max && i <= maxVal; i++) {
-                    if (!result.includes(i)) result.push(i);
-                  }
-                } else {
-                  const num = parseInt(p, 10);
-                  if (!isNaN(num) && num <= maxVal && !result.includes(num)) {
-                    result.push(num);
-                  }
+              } else if (part !== '') {
+                var num = parseInt(part, 10);
+                if (!isNaN(num) && num <= maxValue && result.indexOf(num) === -1) {
+                  result.push(num);
                 }
               }
-              result.sort((a,b) => a - b);
-              return result;
             }
-            
-            const range = process.env.LINK_RANGE || '1-10';
-            const indices = expandRange(range, vods.length);
-            const selected = indices.map(i => vods[i-1]).filter(v => v);
-            
-            let output = '';
-            let links = '';
-            for (let i = 0; i < selected.length; i++) {
-              output += (i+1) + '. ' + selected[i].title + '\n   ' + selected[i].url + '\n\n';
-              links += selected[i].url + '\n';
+            result.sort(function(a, b) { return a - b; });
+            return result;
+          }
+
+          (async function() {
+            var browser = null;
+            try {
+              console.log('Launching Chrome...');
+              browser = await puppeteer.launch({
+                executablePath: '/usr/bin/google-chrome-stable',
+                args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+                headless: 'new'
+              });
+
+              var page = await browser.newPage();
+              await page.setViewport({ width: 1920, height: 1080 });
+
+              var channelUrl = process.env.CHANNEL_URL;
+              channelUrl = channelUrl.replace(/\/$/, '');
+              var videosUrl = channelUrl;
+              if (channelUrl.indexOf('/videos') === -1) {
+                videosUrl = channelUrl + '/videos';
+              }
+
+              console.log('Navigating to: ' + videosUrl);
+              await page.goto(videosUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+
+              console.log('Waiting for page to load...');
+              await new Promise(function(r) { setTimeout(r, 5000); });
+
+              var scrollCount = parseInt(process.env.SCROLL_COUNT, 10) || 3;
+              console.log('Scrolling ' + scrollCount + ' times...');
+              for (var s = 0; s < scrollCount; s++) {
+                await page.evaluate(function() { window.scrollBy(0, window.innerHeight); });
+                await new Promise(function(r) { setTimeout(r, 2000); });
+              }
+              await new Promise(function(r) { setTimeout(r, 3000); });
+
+              console.log('Extracting VOD links...');
+              var vods = [];
+              var seenUrls = {};
+
+              var cards = await page.$$('a[href*="/videos/"], a[href*="/v/"]');
+
+              for (var c = 0; c < cards.length; c++) {
+                try {
+                  var href = await page.evaluate(function(el) { return el.getAttribute('href'); }, cards[c]);
+                  if (!href) continue;
+                  if (href.indexOf('/') === 0) href = 'https://www.twitch.tv' + href;
+                  var cleanUrl = href.split('?')[0];
+                  if (cleanUrl.indexOf('/videos/') === -1 && cleanUrl.indexOf('/v/') === -1) continue;
+                  if (seenUrls[cleanUrl]) continue;
+                  seenUrls[cleanUrl] = true;
+
+                  var title = await page.evaluate(function(el) {
+                    var t = el.querySelector('[data-test-selector="video-card-title"], .tw-title, h3');
+                    if (t) return t.textContent.trim();
+                    var h = el.querySelector('h2, h3, h4');
+                    if (h) return h.textContent.trim();
+                    return 'Untitled';
+                  }, cards[c]);
+
+                  vods.push({ url: cleanUrl, title: title || 'Untitled' });
+                  console.log('Found: ' + title);
+                } catch(e) {
+                  console.log('Error processing card: ' + e.message);
+                }
+              }
+
+              if (vods.length === 0) {
+                console.log('No VODs found with first method, trying fallback...');
+                var moreVods = await page.evaluate(function() {
+                  var results = [];
+                  var links = document.querySelectorAll('a[href*="/videos/"], a[href*="/v/"]');
+                  var seen = {};
+                  for (var i = 0; i < links.length; i++) {
+                    var href = links[i].getAttribute('href');
+                    if (!href) continue;
+                    if (href.indexOf('/') === 0) href = 'https://www.twitch.tv' + href;
+                    var clean = href.split('?')[0];
+                    if (clean.indexOf('/videos/') === -1 && clean.indexOf('/v/') === -1) continue;
+                    if (seen[clean]) continue;
+                    seen[clean] = true;
+                    var title = 'Untitled';
+                    var parent = links[i].closest('[data-test-selector="video-card"], .tw-card');
+                    if (parent) {
+                      var titleEl = parent.querySelector('[data-test-selector="video-card-title"], .tw-title, h3');
+                      if (titleEl) title = titleEl.textContent.trim();
+                    }
+                    results.push({ url: clean, title: title });
+                  }
+                  return results;
+                });
+                for (var v = 0; v < moreVods.length; v++) {
+                  if (!seenUrls[moreVods[v].url]) {
+                    seenUrls[moreVods[v].url] = true;
+                    vods.push(moreVods[v]);
+                  }
+                }
+              }
+
+              console.log('Total VODs found: ' + vods.length);
+              if (vods.length === 0) {
+                console.error('No VODs found');
+                process.exit(1);
+              }
+
+              var range = process.env.LINK_RANGE || '1-10';
+              var indices = expandRange(range, vods.length);
+              var selected = [];
+
+              for (var i = 0; i < indices.length; i++) {
+                var idx = indices[i];
+                if (idx >= 1 && idx <= vods.length) selected.push(vods[idx - 1]);
+              }
+
+              console.log('Selected ' + selected.length + ' VODs');
+
+              var output = '';
+              var links = '';
+              for (var i = 0; i < selected.length; i++) {
+                output = output + (i+1) + '. ' + selected[i].title + '\n   ' + selected[i].url + '\n\n';
+                links = links + selected[i].url + '\n';
+              }
+
+              fs.writeFileSync('/tmp/vod_links.txt', links);
+              fs.writeFileSync('/tmp/vod_full_list.txt', output);
+              fs.writeFileSync('/tmp/link_count.txt', String(selected.length));
+
+              var channelParts = channelUrl.replace(/\/$/, '').split('/');
+              var channelName = channelParts[channelParts.length - 1];
+              fs.writeFileSync('/tmp/channel_name.txt', channelName);
+
+              console.log('Done!');
+              await browser.close();
+            } catch(err) {
+              console.error('Error:', err.message);
+              process.exit(1);
+            } finally {
+              if (browser) await browser.close();
             }
-            
-            fs.writeFileSync('/tmp/vod_links.txt', links);
-            fs.writeFileSync('/tmp/vod_full_list.txt', output);
-            fs.writeFileSync('/tmp/link_count.txt', String(selected.length));
-            
-            const channelName = url.replace(/\/$/, '').split('/').pop();
-            fs.writeFileSync('/tmp/channel_name.txt', channelName);
-            
-            console.log('Done');
-            await browser.close();
-          })();"
+          })();
+          EOF
+
+      - name: Run scraper
+        run: |
+          cd scraper
+          export CHANNEL_URL="${{ inputs.channel_url }}"
+          export LINK_RANGE="${{ inputs.link_range }}"
+          export SCROLL_COUNT="${{ inputs.scroll_count }}"
+          node index.js
 
       - name: Save results
         run: |
-          echo "VOD_LINKS=$(cat /tmp/vod_links.txt)" >> $GITHUB_ENV
-          echo "VOD_FULL_LIST=$(cat /tmp/vod_full_list.txt)" >> $GITHUB_ENV
-          echo "LINK_COUNT=$(cat /tmp/link_count.txt)" >> $GITHUB_ENV
-          echo "CHANNEL_NAME=$(cat /tmp/channel_name.txt)" >> $GITHUB_ENV
+          if [ -f /tmp/vod_links.txt ]; then
+            echo "VOD_LINKS=$(cat /tmp/vod_links.txt)" >> $GITHUB_ENV
+            echo "VOD_FULL_LIST=$(cat /tmp/vod_full_list.txt)" >> $GITHUB_ENV
+            echo "LINK_COUNT=$(cat /tmp/link_count.txt)" >> $GITHUB_ENV
+            echo "CHANNEL_NAME=$(cat /tmp/channel_name.txt)" >> $GITHUB_ENV
+            echo "✅ Results saved"
+          else
+            echo "❌ No results found"
+            exit 1
+          fi
 
       - name: Send to Bale
         run: |
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
+          CHANNEL="${{ env.CHANNEL_NAME }}"
+          COUNT="${{ env.LINK_COUNT }}"
+          LIST="${{ env.VOD_FULL_LIST }}"
+          
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            -d "text=🎥 Twitch VODs Extracted!%0A%0A📺 Channel: ${{ env.CHANNEL_NAME }}%0A📋 VODs found: ${{ env.LINK_COUNT }}%0A%0A${{ env.VOD_FULL_LIST }}%0A💡 Use these with your Video Downloader." \
+            -d "text=🎥 Twitch VODs Extracted!%0A%0A📺 Channel: ${CHANNEL}%0A📋 VODs found: ${COUNT}%0A%0A${LIST}%0A💡 Use these with your Video Downloader." \
             -d "parse_mode=Markdown"
 
       - name: Cleanup
