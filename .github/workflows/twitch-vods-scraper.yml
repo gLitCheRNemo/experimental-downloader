@@ -34,9 +34,8 @@ jobs:
         run: |
           echo "::add-mask::${{ inputs.bale_token }}"
           echo "::add-mask::${{ inputs.bale_chat_id }}"
-          echo "✅ Sensitive inputs masked"
 
-      - name: Install dependencies with Stealth Plugin
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y wget gnupg
@@ -49,14 +48,13 @@ jobs:
           npm init -y
           npm install puppeteer-extra puppeteer-extra-plugin-stealth puppeteer
 
-      - name: Create scraper script with Stealth Plugin
+      - name: Create scraper script
         run: |
           cat > scraper/index.js << 'EOF'
           const puppeteer = require('puppeteer-extra');
           const StealthPlugin = require('puppeteer-extra-plugin-stealth');
           const fs = require('fs');
           
-          // Apply stealth plugin to evade detection
           puppeteer.use(StealthPlugin());
 
           function expandRange(rangeStr, maxValue) {
@@ -87,23 +85,20 @@ jobs:
           (async function() {
             var browser = null;
             try {
-              console.log('🚀 Launching Chrome with Stealth Plugin...');
+              console.log('Launching Chrome...');
               browser = await puppeteer.launch({
                 executablePath: '/usr/bin/google-chrome-stable',
                 args: [
                   '--no-sandbox',
                   '--disable-setuid-sandbox',
                   '--disable-dev-shm-usage',
-                  '--disable-blink-features=AutomationControlled',
-                  '--disable-features=IsolateOrigins,site-per-process'
+                  '--disable-blink-features=AutomationControlled'
                 ],
                 headless: 'new'
               });
 
               var page = await browser.newPage();
               await page.setViewport({ width: 1920, height: 1080 });
-              
-              // Set realistic user agent
               await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
               var channelUrl = process.env.CHANNEL_URL;
@@ -113,27 +108,21 @@ jobs:
                 videosUrl = channelUrl + '/videos';
               }
 
-              console.log('🌐 Navigating to: ' + videosUrl);
+              console.log('Navigating to: ' + videosUrl);
               await page.goto(videosUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-
-              console.log('⏳ Waiting for page to load...');
               await new Promise(function(r) { setTimeout(r, 5000); });
 
               var scrollCount = parseInt(process.env.SCROLL_COUNT, 10) || 3;
-              console.log('📜 Scrolling ' + scrollCount + ' times...');
               for (var s = 0; s < scrollCount; s++) {
                 await page.evaluate(function() { window.scrollBy(0, window.innerHeight); });
                 await new Promise(function(r) { setTimeout(r, 2000); });
               }
               await new Promise(function(r) { setTimeout(r, 3000); });
 
-              console.log('🔍 Extracting VOD links...');
               var vods = [];
               var seenUrls = {};
 
               var cards = await page.$$('a[href*="/videos/"], a[href*="/v/"]');
-
-              console.log('Found ' + cards.length + ' candidate links');
 
               for (var c = 0; c < cards.length; c++) {
                 try {
@@ -155,16 +144,10 @@ jobs:
                   }, cards[c]);
 
                   vods.push({ url: cleanUrl, title: title || 'Untitled' });
-                  console.log('  ✅ Found: ' + title);
-                } catch(e) {
-                  console.log('  ⚠️ Error processing card: ' + e.message);
-                }
+                } catch(e) {}
               }
 
-              console.log('📊 Total VODs found: ' + vods.length);
-              
               if (vods.length === 0) {
-                console.log('No VODs found with link method, trying regex fallback...');
                 var pageContent = await page.content();
                 var matches = pageContent.match(/https:\/\/www\.twitch\.tv\/videos\/\d+/g);
                 if (matches) {
@@ -172,17 +155,14 @@ jobs:
                   for (var m = 0; m < matches.length; m++) {
                     if (!uniqueMatches[matches[m]]) {
                       uniqueMatches[matches[m]] = true;
-                      vods.push({ url: matches[m], title: 'VOD ' + (Object.keys(uniqueMatches).length) });
+                      vods.push({ url: matches[m], title: 'VOD' });
                     }
                   }
-                  console.log('Found ' + vods.length + ' VODs via regex');
                 }
               }
 
               if (vods.length === 0) {
-                console.error('❌ No VODs found');
-                await page.screenshot({ path: '/tmp/debug.png' });
-                console.log('📸 Screenshot saved to /tmp/debug.png');
+                console.log('NO_VODS_FOUND');
                 process.exit(1);
               }
 
@@ -195,8 +175,6 @@ jobs:
                 if (idx >= 1 && idx <= vods.length) selected.push(vods[idx - 1]);
               }
 
-              console.log('✅ Selected ' + selected.length + ' VODs');
-
               var output = '';
               var links = '';
               for (var i = 0; i < selected.length; i++) {
@@ -204,6 +182,7 @@ jobs:
                 links = links + selected[i].url + '\n';
               }
 
+              // Write to files that will be preserved
               fs.writeFileSync('/tmp/vod_links.txt', links);
               fs.writeFileSync('/tmp/vod_full_list.txt', output);
               fs.writeFileSync('/tmp/link_count.txt', String(selected.length));
@@ -212,10 +191,10 @@ jobs:
               var channelName = channelParts[channelParts.length - 1];
               fs.writeFileSync('/tmp/channel_name.txt', channelName);
 
-              console.log('🎉 Done!');
+              console.log('SUCCESS');
               await browser.close();
             } catch(err) {
-              console.error('❌ Error:', err.message);
+              console.log('ERROR: ' + err.message);
               process.exit(1);
             } finally {
               if (browser) await browser.close();
@@ -224,55 +203,55 @@ jobs:
           EOF
 
       - name: Run scraper
+        id: run_scraper
         run: |
           cd scraper
           export CHANNEL_URL="${{ inputs.channel_url }}"
           export LINK_RANGE="${{ inputs.link_range }}"
           export SCROLL_COUNT="${{ inputs.scroll_count }}"
-          node index.js
-
-      - name: Upload debug screenshot
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-screenshot
-          path: /tmp/debug.png
-          retention-days: 1
-
-      - name: Save results
-        run: |
-          if [ -f /tmp/vod_links.txt ]; then
-            echo "VOD_LINKS=$(cat /tmp/vod_links.txt)" >> $GITHUB_ENV
-            echo "VOD_FULL_LIST=$(cat /tmp/vod_full_list.txt)" >> $GITHUB_ENV
-            echo "LINK_COUNT=$(cat /tmp/link_count.txt)" >> $GITHUB_ENV
-            echo "CHANNEL_NAME=$(cat /tmp/channel_name.txt)" >> $GITHUB_ENV
-            echo "✅ Results saved"
+          OUTPUT=$(node index.js 2>&1)
+          echo "$OUTPUT"
+          if echo "$OUTPUT" | grep -q "NO_VODS_FOUND"; then
+            echo "status=no_vods" >> $GITHUB_OUTPUT
+          elif echo "$OUTPUT" | grep -q "SUCCESS"; then
+            echo "status=success" >> $GITHUB_OUTPUT
           else
-            echo "❌ No results found - checking if debug screenshot exists"
-            if [ -f /tmp/debug.png ]; then
-              echo "Debug screenshot available in artifacts"
-            fi
-            exit 1
+            echo "status=error" >> $GITHUB_OUTPUT
           fi
 
-      - name: Send to Bale
-        if: success()
+      - name: Send success to Bale
+        if: steps.run_scraper.outputs.status == 'success'
         run: |
+          VOD_LINKS=$(cat /tmp/vod_links.txt 2>/dev/null || echo "")
+          VOD_FULL_LIST=$(cat /tmp/vod_full_list.txt 2>/dev/null || echo "")
+          LINK_COUNT=$(cat /tmp/link_count.txt 2>/dev/null || echo "0")
+          CHANNEL_NAME=$(cat /tmp/channel_name.txt 2>/dev/null || echo "Unknown")
           TOKEN="${{ inputs.bale_token }}"
           CHAT_ID="${{ inputs.bale_chat_id }}"
-          CHANNEL="${{ env.CHANNEL_NAME }}"
-          COUNT="${{ env.LINK_COUNT }}"
-          LIST="${{ env.VOD_FULL_LIST }}"
-          
-          # Truncate if too long
-          if [ ${#LIST} -gt 3500 ]; then
-            LIST="${LIST:0:3500}..."
-          fi
           
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
-            -d "text=🎥 Twitch VODs Extracted!%0A%0A📺 Channel: ${CHANNEL}%0A📋 VODs found: ${COUNT}%0A%0A${LIST}%0A💡 Use these with your Video Downloader." \
-            -d "parse_mode=Markdown"
+            -d "text=✅ Twitch VODs Extracted!%0A%0A📺 Channel: ${CHANNEL_NAME}%0A📋 VODs found: ${LINK_COUNT}%0A%0A${VOD_FULL_LIST}%0A💡 Use these with your Video Downloader."
+
+      - name: Send no VODs message to Bale
+        if: steps.run_scraper.outputs.status == 'no_vods'
+        run: |
+          TOKEN="${{ inputs.bale_token }}"
+          CHAT_ID="${{ inputs.bale_chat_id }}"
+          CHANNEL="${{ inputs.channel_url }}"
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=⚠️ No VODs found for ${CHANNEL}%0A%0APossible reasons:%0A- Channel has no past broadcasts%0A- Channel requires login to view VODs%0A- Twitch is blocking the request"
+
+      - name: Send error message to Bale
+        if: steps.run_scraper.outputs.status == 'error'
+        run: |
+          TOKEN="${{ inputs.bale_token }}"
+          CHAT_ID="${{ inputs.bale_chat_id }}"
+          CHANNEL="${{ inputs.channel_url }}"
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=❌ Failed to scrape VODs for ${CHANNEL}%0A%0AThe scraper encountered an error. This may be due to:%0A- Twitch anti-bot protection%0A- Network issues%0A- Channel page not loading properly"
 
       - name: Cleanup
-        run: rm -rf scraper /tmp/vod_* /tmp/debug.png
+        run: rm -rf scraper /tmp/vod_* 2>/dev/null || true
