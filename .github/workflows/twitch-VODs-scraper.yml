@@ -17,11 +17,6 @@ on:
         required: false
         default: '3'
         type: string
-      parts_size:
-        description: '🫙 Parts size for download links file (MB)'
-        required: false
-        type: string
-        default: '45'
       bale_token:
         description: '🤖 Bale Bot Token (for sending the VOD links)'
         required: true
@@ -65,37 +60,42 @@ jobs:
           SCROLL_COUNT="${{ inputs.scroll_count }}"
 
           cd scraper_script
-          node << 'EOF'
+          cat > scrape.js << 'EOF'
           const puppeteer = require('puppeteer');
           const fs = require('fs');
 
           function expandRange(rangeStr, maxValue) {
-            const result = new Set();
-            const parts = rangeStr.split(',');
+            var result = [];
+            var parts = rangeStr.split(',');
             
-            for (let p of parts) {
-              let part = p.trim();
-              if (part.includes('-')) {
-                let rangeParts = part.split('-');
-                let start = parseInt(rangeParts[0], 10);
-                let end = parseInt(rangeParts[1], 10);
-                let min = Math.min(start, end);
-                let max = Math.max(start, end);
-                for (let i = min; i <= max && i <= maxValue; i++) {
-                  result.add(i);
+            for (var p = 0; p < parts.length; p++) {
+              var part = parts[p].trim();
+              if (part.indexOf('-') !== -1) {
+                var rangeParts = part.split('-');
+                var start = parseInt(rangeParts[0], 10);
+                var end = parseInt(rangeParts[1], 10);
+                var min = Math.min(start, end);
+                var max = Math.max(start, end);
+                for (var i = min; i <= max && i <= maxValue; i++) {
+                  if (result.indexOf(i) === -1) {
+                    result.push(i);
+                  }
                 }
               } else if (part !== '') {
-                let num = parseInt(part, 10);
+                var num = parseInt(part, 10);
                 if (!isNaN(num) && num <= maxValue) {
-                  result.add(num);
+                  if (result.indexOf(num) === -1) {
+                    result.push(num);
+                  }
                 }
               }
             }
-            return Array.from(result).sort(function(a, b) { return a - b; });
+            result.sort(function(a, b) { return a - b; });
+            return result;
           }
 
-          (async () => {
-            let browser = null;
+          (async function() {
+            var browser = null;
             try {
               console.log('🚀 Launching Chrome browser...');
               browser = await puppeteer.launch({
@@ -111,84 +111,74 @@ jobs:
                 headless: 'new'
               });
 
-              const page = await browser.newPage();
+              var page = await browser.newPage();
               await page.setViewport({ width: 1920, height: 1080 });
 
-              let channelUrl = process.env.CHANNEL_URL;
+              var channelUrl = process.env.CHANNEL_URL;
               channelUrl = channelUrl.replace(/\/$/, '');
-              let videosUrl = channelUrl;
-              if (!channelUrl.endsWith('/videos')) {
+              var videosUrl = channelUrl;
+              if (channelUrl.indexOf('/videos') === -1) {
                 videosUrl = channelUrl + '/videos';
               }
 
-              console.log(`🌐 Navigating to: ${videosUrl}`);
+              console.log('🌐 Navigating to: ' + videosUrl);
               await page.goto(videosUrl, {
                 waitUntil: 'networkidle2',
                 timeout: 60000
               });
 
               console.log('⏳ Waiting 5 seconds for initial page load...');
-              await new Promise(resolve => setTimeout(resolve, 5000));
+              await new Promise(function(resolve) { setTimeout(resolve, 5000); });
 
-              const scrollCount = parseInt(process.env.SCROLL_COUNT, 10) || 3;
-              console.log(`📜 Scrolling down ${scrollCount} times to load more videos...`);
-              for (let i = 0; i < scrollCount; i++) {
-                await page.evaluate(() => {
+              var scrollCount = parseInt(process.env.SCROLL_COUNT, 10) || 3;
+              console.log('📜 Scrolling down ' + scrollCount + ' times to load more videos...');
+              for (var s = 0; s < scrollCount; s++) {
+                await page.evaluate(function() {
                   window.scrollBy(0, window.innerHeight);
                 });
-                await new Promise(resolve => setTimeout(resolve, 2000));
+                await new Promise(function(resolve) { setTimeout(resolve, 2000); });
               }
-              await new Promise(resolve => setTimeout(resolve, 3000));
+              await new Promise(function(resolve) { setTimeout(resolve, 3000); });
 
               console.log('🔍 Extracting VOD links and titles from page...');
 
-              const vods = [];
-              const processedUrls = new Set();
+              var vods = [];
+              var processedUrls = {};
 
-              const videoCards = await page.$$('a[data-test-selector="video-card-link"], a[href*="/videos/"], a[href*="/v/"]');
+              var videoCards = await page.$$('a[data-test-selector="video-card-link"], a[href*="/videos/"], a[href*="/v/"]');
 
-              for (let card of videoCards) {
+              for (var c = 0; c < videoCards.length; c++) {
                 try {
-                  let href = await page.evaluate(el => el.getAttribute('href'), card);
+                  var href = await page.evaluate(function(el) {
+                    return el.getAttribute('href');
+                  }, videoCards[c]);
                   if (!href) continue;
 
-                  if (href.startsWith('/')) {
+                  if (href.indexOf('/') === 0) {
                     href = 'https://www.twitch.tv' + href;
                   }
-                  const cleanUrl = href.split('?')[0];
+                  var cleanUrl = href.split('?')[0];
 
-                  if (!cleanUrl.includes('/videos/') && !cleanUrl.includes('/v/')) continue;
-                  if (processedUrls.has(cleanUrl)) continue;
+                  if (cleanUrl.indexOf('/videos/') === -1 && cleanUrl.indexOf('/v/') === -1) continue;
+                  if (processedUrls[cleanUrl]) continue;
 
-                  let title = await page.evaluate(el => {
-                    const titleEl = el.querySelector('[data-test-selector="video-card-title"], .tw-title, h3, .video-title');
+                  var title = await page.evaluate(function(el) {
+                    var titleEl = el.querySelector('[data-test-selector="video-card-title"], .tw-title, h3, .video-title');
                     if (titleEl) {
                       return titleEl.textContent.trim();
                     }
-                    const heading = el.querySelector('h2, h3, h4');
+                    var heading = el.querySelector('h2, h3, h4');
                     if (heading) {
                       return heading.textContent.trim();
                     }
                     return null;
-                  }, card);
+                  }, videoCards[c]);
 
                   if (!title || title === '') {
-                    title = await page.evaluate((url) => {
-                      const linkElement = document.querySelector('a[href="' + url + '"]');
-                      if (linkElement) {
-                        const cardEl = linkElement.closest('[data-test-selector="video-card"], .tw-card, article');
-                        if (cardEl) {
-                          const titleEl = cardEl.querySelector('[data-test-selector="video-card-title"], .tw-title, h3, h4, .video-title');
-                          if (titleEl) return titleEl.textContent.trim();
-                        }
-                      }
-                      return 'Untitled VOD';
-                    }, cleanUrl);
+                    title = 'Untitled VOD';
                   }
 
-                  if (!title || title === '') title = 'Untitled VOD';
-
-                  processedUrls.add(cleanUrl);
+                  processedUrls[cleanUrl] = true;
                   vods.push({ url: cleanUrl, title: title });
                 } catch(err) {
                   console.log('  ⚠️ Error processing card: ' + err.message);
@@ -197,24 +187,24 @@ jobs:
 
               if (vods.length === 0) {
                 console.log('  Retrying with fallback extraction method...');
-                const vodsFromPage = await page.evaluate(() => {
-                  const results = [];
-                  const links = document.querySelectorAll('a[href*="/videos/"], a[href*="/v/"]');
-                  const uniqueUrls = new Set();
+                var vodsFromPage = await page.evaluate(function() {
+                  var results = [];
+                  var links = document.querySelectorAll('a[href*="/videos/"], a[href*="/v/"]');
+                  var uniqueUrls = {};
 
-                  for (let link of links) {
-                    let href = link.getAttribute('href');
+                  for (var i = 0; i < links.length; i++) {
+                    var href = links[i].getAttribute('href');
                     if (href) {
-                      if (href.startsWith('/')) href = 'https://www.twitch.tv' + href;
-                      const cleanUrl = href.split('?')[0];
-                      if (!cleanUrl.includes('/videos/') && !cleanUrl.includes('/v/')) continue;
-                      if (uniqueUrls.has(cleanUrl)) continue;
-                      uniqueUrls.add(cleanUrl);
+                      if (href.indexOf('/') === 0) href = 'https://www.twitch.tv' + href;
+                      var cleanUrl = href.split('?')[0];
+                      if (cleanUrl.indexOf('/videos/') === -1 && cleanUrl.indexOf('/v/') === -1) continue;
+                      if (uniqueUrls[cleanUrl]) continue;
+                      uniqueUrls[cleanUrl] = true;
 
-                      let title = 'Untitled VOD';
-                      const parent = link.closest('[data-test-selector="video-card"], .tw-card, article, div');
+                      var title = 'Untitled VOD';
+                      var parent = links[i].closest('[data-test-selector="video-card"], .tw-card, article, div');
                       if (parent) {
-                        const titleEl = parent.querySelector('[data-test-selector="video-card-title"], .tw-title, h3, h4, .video-title');
+                        var titleEl = parent.querySelector('[data-test-selector="video-card-title"], .tw-title, h3, h4, .video-title');
                         if (titleEl) title = titleEl.textContent.trim();
                       }
                       results.push({ url: cleanUrl, title: title });
@@ -223,10 +213,10 @@ jobs:
                   return results;
                 });
                 
-                for (let vod of vodsFromPage) {
-                  if (!processedUrls.has(vod.url)) {
-                    processedUrls.add(vod.url);
-                    vods.push(vod);
+                for (var v = 0; v < vodsFromPage.length; v++) {
+                  if (!processedUrls[vodsFromPage[v].url]) {
+                    processedUrls[vodsFromPage[v].url] = true;
+                    vods.push(vodsFromPage[v]);
                   }
                 }
               }
@@ -238,23 +228,23 @@ jobs:
               }
 
               console.log('\n📋 All found VODs:');
-              for (let i = 0; i < vods.length; i++) {
+              for (var i = 0; i < vods.length; i++) {
                 console.log('  ' + (i + 1) + '. ' + vods[i].title);
                 console.log('     ' + vods[i].url);
               }
 
-              const linkRange = process.env.LINK_RANGE || '1-10';
-              const maxIndex = vods.length;
-              const selectedIndices = expandRange(linkRange, maxIndex);
+              var linkRange = process.env.LINK_RANGE || '1-10';
+              var maxIndex = vods.length;
+              var selectedIndices = expandRange(linkRange, maxIndex);
 
               if (selectedIndices.length === 0) {
                 console.error('❌ No valid indices in range "' + linkRange + '". Max index is ' + maxIndex);
                 process.exit(1);
               }
 
-              const selectedVods = [];
-              for (let i = 0; i < selectedIndices.length; i++) {
-                let idx = selectedIndices[i];
+              var selectedVods = [];
+              for (var i = 0; i < selectedIndices.length; i++) {
+                var idx = selectedIndices[i];
                 if (idx >= 1 && idx <= maxIndex) {
                   selectedVods.push(vods[idx - 1]);
                 }
@@ -262,20 +252,20 @@ jobs:
 
               console.log('\n✅ Selected ' + selectedVods.length + ' VOD(s) (range: ' + linkRange + ')');
               console.log('\n📋 Selected VODs:');
-              for (let i = 0; i < selectedVods.length; i++) {
+              for (var i = 0; i < selectedVods.length; i++) {
                 console.log('  ' + (i + 1) + '. ' + selectedVods[i].title);
                 console.log('     ' + selectedVods[i].url);
               }
 
-              let linksOnly = '';
-              let titlesOnly = '';
-              let formattedOutput = '';
+              var linksOnly = '';
+              var titlesOnly = '';
+              var formattedOutput = '';
 
-              for (let i = 0; i < selectedVods.length; i++) {
-                let vod = selectedVods[i];
-                linksOnly += vod.url + '\n';
-                titlesOnly += vod.title + '\n';
-                formattedOutput += (i + 1) + '. ' + vod.title + '\n   ' + vod.url + '\n\n';
+              for (var i = 0; i < selectedVods.length; i++) {
+                var vod = selectedVods[i];
+                linksOnly = linksOnly + vod.url + '\n';
+                titlesOnly = titlesOnly + vod.title + '\n';
+                formattedOutput = formattedOutput + (i + 1) + '. ' + vod.title + '\n   ' + vod.url + '\n\n';
               }
 
               fs.writeFileSync('/tmp/vod_links.txt', linksOnly);
@@ -283,13 +273,14 @@ jobs:
               fs.writeFileSync('/tmp/vod_full_list.txt', formattedOutput);
               fs.writeFileSync('/tmp/link_count.txt', String(selectedVods.length));
 
-              let allFormatted = '';
-              for (let i = 0; i < vods.length; i++) {
-                allFormatted += (i + 1) + '. ' + vods[i].title + '\n   ' + vods[i].url + '\n\n';
+              var allFormatted = '';
+              for (var i = 0; i < vods.length; i++) {
+                allFormatted = allFormatted + (i + 1) + '. ' + vods[i].title + '\n   ' + vods[i].url + '\n\n';
               }
               fs.writeFileSync('/tmp/all_vods.txt', allFormatted);
 
-              const channelName = channelUrl.replace(/\/$/, '').split('/').pop();
+              var channelNameParts = channelUrl.replace(/\/$/, '').split('/');
+              var channelName = channelNameParts[channelNameParts.length - 1];
               fs.writeFileSync('/tmp/channel_name.txt', channelName);
 
               console.log('\n✅ Successfully extracted VODs with titles!');
@@ -305,6 +296,8 @@ jobs:
             }
           })();
           EOF
+
+          node scrape.js
 
           cd ..
 
