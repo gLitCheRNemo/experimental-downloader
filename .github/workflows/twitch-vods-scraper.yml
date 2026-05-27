@@ -17,24 +17,11 @@ on:
         required: false
         default: '3'
         type: string
-      bale_token:
-        description: 'Bale Bot Token'
-        required: true
-        type: string
-      bale_chat_id:
-        description: 'Bale Chat ID'
-        required: true
-        type: string
 
 jobs:
   scrape-vods:
     runs-on: ubuntu-latest
     steps:
-      - name: Mask sensitive inputs
-        run: |
-          echo "::add-mask::${{ inputs.bale_token }}"
-          echo "::add-mask::${{ inputs.bale_chat_id }}"
-
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -226,8 +213,8 @@ jobs:
           VOD_FULL_LIST=$(cat /tmp/vod_full_list.txt 2>/dev/null || echo "")
           LINK_COUNT=$(cat /tmp/link_count.txt 2>/dev/null || echo "0")
           CHANNEL_NAME=$(cat /tmp/channel_name.txt 2>/dev/null || echo "Unknown")
-          TOKEN="${{ inputs.bale_token }}"
-          CHAT_ID="${{ inputs.bale_chat_id }}"
+          TOKEN="${{ secrets.BALE_TOKEN }}"
+          CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
           
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
@@ -236,8 +223,8 @@ jobs:
       - name: Send no VODs message to Bale
         if: steps.run_scraper.outputs.status == 'no_vods'
         run: |
-          TOKEN="${{ inputs.bale_token }}"
-          CHAT_ID="${{ inputs.bale_chat_id }}"
+          TOKEN="${{ secrets.BALE_TOKEN }}"
+          CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
           CHANNEL="${{ inputs.channel_url }}"
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
@@ -246,8 +233,8 @@ jobs:
       - name: Send error message to Bale
         if: steps.run_scraper.outputs.status == 'error'
         run: |
-          TOKEN="${{ inputs.bale_token }}"
-          CHAT_ID="${{ inputs.bale_chat_id }}"
+          TOKEN="${{ secrets.BALE_TOKEN }}"
+          CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
           CHANNEL="${{ inputs.channel_url }}"
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
