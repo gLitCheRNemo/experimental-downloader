@@ -13,7 +13,7 @@ on:
         required: false
         default: '10'
         type: string
-        
+
 permissions:
   contents: write
 
@@ -21,12 +21,37 @@ jobs:
   check-status:
     name: 📊 Check Repository Status
     runs-on: ubuntu-latest
-    
+    outputs:
+      before_size_bytes: ${{ steps.before_size.outputs.size_bytes }}
+      before_size_human: ${{ steps.before_size.outputs.size_human }}
+      size_limit_mb: ${{ steps.size_limit.outputs.value }}
     steps:
       - name: 📥 Fetch full history
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Get size limit
+        id: size_limit
+        run: |
+          echo "value=${{ github.event.inputs.size_limit }}" >> $GITHUB_OUTPUT
+
+      - name: 📊 Calculate before size
+        id: before_size
+        run: |
+          SIZE_BYTES=$(du -sb .git/objects | cut -f1)
+          echo "size_bytes=$SIZE_BYTES" >> $GITHUB_OUTPUT
+
+          if [ $SIZE_BYTES -gt 1073741824 ]; then
+            SIZE_GB=$(echo "scale=2; $SIZE_BYTES / 1073741824" | bc)
+            echo "size_human=${SIZE_GB} GB" >> $GITHUB_OUTPUT
+          elif [ $SIZE_BYTES -gt 1048576 ]; then
+            SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1048576" | bc)
+            echo "size_human=${SIZE_MB} MB" >> $GITHUB_OUTPUT
+          else
+            SIZE_KB=$(echo "scale=2; $SIZE_BYTES / 1024" | bc)
+            echo "size_human=${SIZE_KB} KB" >> $GITHUB_OUTPUT
+          fi
 
       - name: 📊 Show repository status summary
         run: |
@@ -35,6 +60,134 @@ jobs:
           
           echo "## 📊 Repository Status Before Cleaning" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⚙️ Settings" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Size limit | ${SIZE_LIMIT} MB |" >> $GITHUB_STEP_SUMMARY
+          echo "| Files larger than ${SIZE_LIMIT}MB will be removed | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### 📦 Repository Size" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| .git folder | $(du -sh .git | cut -f1) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Objects | $(du -sh .git/objects | cut -f1) |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### 🔢 Number of Commits" >> $GITHUB_STEP_SUMMARY
+          echo "**$(git rev-list --count HEAD)** commits" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### 📁 Files larger than ${SIZE_LIMIT}MB in history" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          git rev-list --objects --all | \
+            git cat-file --batch-check='%(objecttype) %(objectname) %(objectsize) %(rest)' | \
+            sed -n 's/^blob //p' | \
+            awk -v LIMIT=$SIZE_LIMIT_BYTES '$2 >= LIMIT { print $3, int($2/1048576) "MB" }' | \
+            sort -k2 -rn | head -20 >> $GITHUB_STEP_SUMMARY || echo "No files found ✅" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  clean-history:
+    name: 🗑️ Clean Repository History
+    needs: check-status
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 Fetch full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: ⚙️ Install git-filter-repo
+        run: pip install git-filter-repo
+
+      - name: 🧹 Remove files larger than selected size from history
+        run: |
+          SIZE_LIMIT="${{ github.event.inputs.size_limit }}"
+          echo "Removing files larger than ${SIZE_LIMIT}MB from history..."
+          git filter-repo --strip-blobs-bigger-than ${SIZE_LIMIT}M --force
+
+      - name: 🚀 Push changes to repository
+        run: |
+          git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          git push --force --all
+          git push --force --tags
+
+      - name: 📊 Calculate after size
+        id: after_size
+        run: |
+          SIZE_BYTES=$(du -sb .git/objects | cut -f1)
+          echo "size_bytes=$SIZE_BYTES" >> $GITHUB_OUTPUT
+
+          if [ $SIZE_BYTES -gt 1073741824 ]; then
+            SIZE_GB=$(echo "scale=2; $SIZE_BYTES / 1073741824" | bc)
+            echo "size_human=${SIZE_GB} GB" >> $GITHUB_OUTPUT
+          elif [ $SIZE_BYTES -gt 1048576 ]; then
+            SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1048576" | bc)
+            echo "size_human=${SIZE_MB} MB" >> $GITHUB_OUTPUT
+          else
+            SIZE_KB=$(echo "scale=2; $SIZE_BYTES / 1024" | bc)
+            echo "size_human=${SIZE_KB} KB" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 📊 Calculate removed size
+        id: removed_size
+        run: |
+          BEFORE=${{ needs.check-status.outputs.before_size_bytes }}
+          AFTER=${{ steps.after_size.outputs.size_bytes }}
+          REMOVED=$((BEFORE - AFTER))
+          echo "removed_bytes=$REMOVED" >> $GITHUB_OUTPUT
+
+          if [ $REMOVED -gt 1073741824 ]; then
+            REMOVED_GB=$(echo "scale=2; $REMOVED / 1073741824" | bc)
+            echo "removed_human=${REMOVED_GB} GB" >> $GITHUB_OUTPUT
+          elif [ $REMOVED -gt 1048576 ]; then
+            REMOVED_MB=$(echo "scale=2; $REMOVED / 1048576" | bc)
+            echo "removed_human=${REMOVED_MB} MB" >> $GITHUB_OUTPUT
+          else
+            REMOVED_KB=$(echo "scale=2; $REMOVED / 1024" | bc)
+            echo "removed_human=${REMOVED_KB} KB" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 📤 Send report to Bale bot
+        run: |
+          TOKEN="${{ secrets.BALE_TOKEN }}"
+          CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
+          BEFORE="${{ needs.check-status.outputs.before_size_human }}"
+          AFTER="${{ steps.after_size.outputs.size_human }}"
+          REMOVED="${{ steps.removed_size.outputs.removed_human }}"
+          SIZE_LIMIT="${{ needs.check-status.outputs.size_limit_mb }}"
+
+          MESSAGE="🧹 **CLEANUP REPORT** 🧹%0A%0A"
+          MESSAGE="${MESSAGE}🗑️ **Removed:** ${REMOVED}%0A"
+          MESSAGE="${MESSAGE}📦 **Before:** ${BEFORE}%0A"
+          MESSAGE="${MESSAGE}✨ **After:** ${AFTER}%0A"
+          MESSAGE="${MESSAGE}⚙️ **Size limit:** ${SIZE_LIMIT} MB%0A%0A"
+          MESSAGE="${MESSAGE}✅ All files larger than ${SIZE_LIMIT}MB have been removed from history!%0A%0A"
+          MESSAGE="${MESSAGE}🔗 Repository: ${{ github.repository }}"
+
+          curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=${MESSAGE}"
+
+      - name: ✅ Show final result
+        run: |
+          echo "## ✅ Cleaning completed successfully!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⚙️ Settings used" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Size limit | ${{ github.event.inputs.size_limit }} MB |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📏 Size Report" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Before | ${{ needs.check-status.outputs.before_size_human }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| After | ${{ steps.after_size.outputs.size_human }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Removed | ${{ steps.removed_size.outputs.removed_human }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🎉 All files larger than ${{ github.event.inputs.size_limit }}MB have been removed from history!" >> $GITHUB_STEP_SUMMARY          echo "" >> $GITHUB_STEP_SUMMARY
           echo "### ⚙️ Settings" >> $GITHUB_STEP_SUMMARY
           echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
