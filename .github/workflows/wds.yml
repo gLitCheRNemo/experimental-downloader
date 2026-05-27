@@ -17,14 +17,6 @@ on:
         required: false
         type: string
         default: '45'
-      bale_token:
-        description: '🤖 Bale Bot Token (for sending files)'
-        required: true
-        type: string
-      bale_chat_id:
-        description: '💬 Bale Chat ID (for sending files)'
-        required: true
-        type: string
 
 jobs:
   # ============================================
@@ -144,8 +136,6 @@ jobs:
             
             # Commit this batch
             git commit -m "[bot] Add website files batch $BATCH_NUM ($(echo $BATCH_FILES | wc -w) files)"
-            
-            # Push after each batch
             git push
             
             echo "✅ Batch $BATCH_NUM committed and pushed"
@@ -173,11 +163,6 @@ jobs:
     if: always() && needs.archive-and-release.result == 'success'
     
     steps:
-      - name: Mask sensitive inputs
-        run: |
-          echo "::add-mask::${{ inputs.bale_token }}"
-          echo "::add-mask::${{ inputs.bale_chat_id }}"
-
       - name: Download README artifact from previous job
         uses: actions/download-artifact@v4
         with:
@@ -258,8 +243,8 @@ jobs:
 
       - name: Send files to Bale bot
         run: |
-          TOKEN="${{ inputs.bale_token }}"
-          CHAT_ID="${{ inputs.bale_chat_id }}"
+          TOKEN="${{ secrets.BALE_TOKEN }}"
+          CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
           LINK_COUNT="${{ env.LINK_COUNT }}"
           
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
