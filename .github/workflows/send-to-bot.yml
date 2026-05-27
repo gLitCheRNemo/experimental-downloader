@@ -26,24 +26,11 @@ on:
         required: false
         default: 'false'
         type: boolean
-      bale_token:
-        description: 'Bale Bot Token'
-        required: true
-        type: string
-      bale_chat_id:
-        description: 'Bale Chat ID'
-        required: true
-        type: string
 
 jobs:
   resend:
     runs-on: ubuntu-latest
     steps:
-      - name: Mask sensitive inputs
-        run: |
-          echo "::add-mask::${{ inputs.bale_token }}"
-          echo "::add-mask::${{ inputs.bale_chat_id }}"
-
       - name: Determine source and extract links
         id: extract
         run: |
@@ -322,8 +309,8 @@ jobs:
 
       - name: Process and send each batch
         run: |
-          TOKEN="${{ inputs.bale_token }}"
-          CHAT_ID="${{ inputs.bale_chat_id }}"
+          TOKEN="${{ secrets.BALE_TOKEN }}"
+          CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
           TOTAL_BATCHES="${{ env.TOTAL_BATCHES }}"
           INCLUDE_THUMBNAIL="${{ env.INCLUDE_THUMBNAIL }}"
           
