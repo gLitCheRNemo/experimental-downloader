@@ -16,14 +16,6 @@ on:
         required: false
         default: '10'
         type: string
-      bale_token:
-        description: '🤖 Bale Bot Token (for sending result message)'
-        required: false
-        type: string
-      bale_chat_id:
-        description: '💬 Bale Chat ID (for sending result message)'
-        required: false
-        type: string
 
 permissions:
   contents: write
@@ -40,12 +32,6 @@ jobs:
       total_branch_size_human: ${{ steps.calc.outputs.total_branch_size_human }}
       branch_names: ${{ steps.calc.outputs.branch_names }}
     steps:
-      - name: Mask sensitive inputs
-        if: ${{ inputs.bale_token != '' && inputs.bale_chat_id != '' }}
-        run: |
-          echo "::add-mask::${{ inputs.bale_token }}"
-          echo "::add-mask::${{ inputs.bale_chat_id }}"
-
       - name: Calculate branch sizes
         id: calc
         run: |
@@ -166,12 +152,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: [calculate-branch-sizes, delete-branches]
     steps:
-      - name: Mask sensitive inputs
-        if: ${{ inputs.bale_token != '' && inputs.bale_chat_id != '' }}
-        run: |
-          echo "::add-mask::${{ inputs.bale_token }}"
-          echo "::add-mask::${{ inputs.bale_chat_id }}"
-
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -245,10 +225,9 @@ jobs:
           fi
 
       - name: Send report to Bale bot
-        if: ${{ inputs.bale_token != '' && inputs.bale_chat_id != '' }}
         run: |
-          TOKEN="${{ inputs.bale_token }}"
-          CHAT_ID="${{ inputs.bale_chat_id }}"
+          TOKEN="${{ secrets.BALE_TOKEN }}"
+          CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
           BRANCH_NAMES="${{ needs.calculate-branch-sizes.outputs.branch_names }}"
           BRANCH_SIZES="${{ needs.calculate-branch-sizes.outputs.branch_sizes }}"
           TOTAL_BRANCH_SIZE="${{ needs.calculate-branch-sizes.outputs.total_branch_size_human }}"
