@@ -3,8 +3,8 @@ name: Twitch VODs Scraper
 on:
   workflow_dispatch:
     inputs:
-      channel_url:
-        description: 'Twitch channel URL'
+      channel_name:
+        description: 'Twitch channel name (e.g., foolish, shroud, xqc)'
         required: true
         type: string
       link_range:
@@ -88,14 +88,10 @@ jobs:
               await page.setViewport({ width: 1920, height: 1080 });
               await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
-              var channelUrl = process.env.CHANNEL_URL;
-              channelUrl = channelUrl.replace(/\/$/, '');
-              var videosUrl = channelUrl;
-              if (channelUrl.indexOf('/videos') === -1) {
-                videosUrl = channelUrl + '/videos';
-              }
-              // Add filter to show only past broadcasts (archives), sorted by time
-              videosUrl = videosUrl + '?filter=archives&sort=time';
+              var channelName = process.env.CHANNEL_NAME;
+              channelName = channelName.toLowerCase().trim();
+              var channelUrl = 'https://www.twitch.tv/' + channelName;
+              var videosUrl = channelUrl + '/videos?filter=archives&sort=time';
 
               console.log('Navigating to: ' + videosUrl);
               await page.goto(videosUrl, { waitUntil: 'networkidle2', timeout: 60000 });
@@ -174,9 +170,6 @@ jobs:
               fs.writeFileSync('/tmp/vod_links.txt', links);
               fs.writeFileSync('/tmp/vod_full_list.txt', output);
               fs.writeFileSync('/tmp/link_count.txt', String(selected.length));
-
-              var channelParts = channelUrl.replace(/\/$/, '').split('/');
-              var channelName = channelParts[channelParts.length - 1];
               fs.writeFileSync('/tmp/channel_name.txt', channelName);
 
               console.log('SUCCESS');
@@ -194,7 +187,7 @@ jobs:
         id: run_scraper
         run: |
           cd scraper
-          export CHANNEL_URL="${{ inputs.channel_url }}"
+          export CHANNEL_NAME="${{ inputs.channel_name }}"
           export LINK_RANGE="${{ inputs.link_range }}"
           export SCROLL_COUNT="${{ inputs.scroll_count }}"
           OUTPUT=$(node index.js 2>&1)
@@ -227,9 +220,9 @@ jobs:
         run: |
           TOKEN="${{ secrets.BALE_TOKEN }}"
           CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
-          CHANNEL="${{ inputs.channel_url }}"
+          CHANNEL_NAME="${{ inputs.channel_name }}"
           
-          MESSAGE="⚠️ No VODs found for ${CHANNEL}%0A%0APossible reasons:%0A- Channel has no past broadcasts%0A- Channel requires login to view VODs%0A- Twitch is blocking the request"
+          MESSAGE="⚠️ No VODs found for ${CHANNEL_NAME}%0A%0APossible reasons:%0A- Channel has no past broadcasts%0A- Channel requires login to view VODs%0A- Twitch is blocking the request"
           
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
@@ -240,9 +233,9 @@ jobs:
         run: |
           TOKEN="${{ secrets.BALE_TOKEN }}"
           CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
-          CHANNEL="${{ inputs.channel_url }}"
+          CHANNEL_NAME="${{ inputs.channel_name }}"
           
-          MESSAGE="❌ Failed to scrape VODs for ${CHANNEL}%0A%0AThe scraper encountered an error. This may be due to:%0A- Twitch anti-bot protection%0A- Network issues%0A- Channel page not loading properly"
+          MESSAGE="❌ Failed to scrape VODs for ${CHANNEL_NAME}%0A%0AThe scraper encountered an error. This may be due to:%0A- Twitch anti-bot protection%0A- Network issues%0A- Channel page not loading properly"
           
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
