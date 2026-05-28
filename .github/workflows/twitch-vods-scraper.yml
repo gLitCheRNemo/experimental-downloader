@@ -209,7 +209,7 @@ jobs:
           TOKEN="${{ secrets.BALE_TOKEN }}"
           CHAT_ID="${{ secrets.BALE_CHAT_ID }}"
           
-          MESSAGE="✅ Twitch VODs Extracted!%0A%0A📺 Channel: ${CHANNEL_NAME}%0A📋 VODs found: ${LINK_COUNT}%0A%0A${VOD_FULL_LIST}%0A💡 Use these with your Video Downloader."
+          MESSAGE="✅ Twitch VODs Extracted!%0A%0A📺 Channel: ${CHANNEL_NAME}%0A📋 VODs found: ${LINK_COUNT}%0A${VOD_FULL_LIST}%0A%0A💡 Use these with your Video Downloader."
           
           curl -s -X POST "https://tapi.bale.ai/bot${TOKEN}/sendMessage" \
             -d "chat_id=${CHAT_ID}" \
